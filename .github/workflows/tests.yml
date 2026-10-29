@@ -18,7 +18,7 @@ jobs:
     name: suites that need no Hermes (system python3)
     runs-on: macos-latest
     steps:
-      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - name: Refuse the build-config dropper's off-screen padding, before anything runs
         # Structure, not identifiers (the 2026-07 campaign's build ID changed on every push):
         # a run of 200 or more spaces. A grep that cannot finish fails the job, never passes it.
@@ -46,7 +46,7 @@ jobs:
     name: every suite, inside Hermes Agent's own environment
     runs-on: macos-latest
     steps:
-      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - name: Refuse the build-config dropper's off-screen padding, before Hermes is installed
         run: |
           set +e
