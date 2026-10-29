@@ -58,6 +58,16 @@ runs a cloud model and his texting profile runs a local one, and this is what ke
 `hermes plugins enable` in the wrong profile from handing his texts to the cloud model. The
 profile name is `TEXTING_PROFILE` in `handles.py`.
 
+And a guard on what a text can do: the adapter reads the profile's `config.yaml` at start
+and refuses to run unless the platform has a saved toolsets list
+(`platform_toolsets.imessage_shortcuts`) naming nothing beyond `imessage_shortcuts` and
+`memory`, and no MCP server is configured (Hermes merges those into every platform's
+toolsets, and with no saved list it hands the platform every core toolset). A terminal, a
+browser or a file tool reached by text would act with whatever access the gateway's process
+has, so the list is closed rather than open. `allowed_toolsets.py` holds the check; save the
+list with
+`hermes -p imessage config set platform_toolsets.imessage_shortcuts '["imessage_shortcuts","memory"]'`.
+
 ## What you need
 
 - A Mac on a recent macOS (built and run on macOS 26) that stays on.
@@ -149,7 +159,7 @@ contract is `POST /` with a JSON body of `sender`, `sent_at` and `text` and the 
 
 | Path | What it is |
 |---|---|
-| `imessage-shortcuts/` | the plugin: `adapter.py` (the loopback listener and the replies), `handles.py` (canonical handles and the allow list), `inbound.py` (the request's shape), `imsg.py` (finding and calling imsg), `household.py` and `tools.py` (the optional forward), `registration.py`, `plugin.yaml` |
+| `imessage-shortcuts/` | the plugin: `adapter.py` (the loopback listener and the replies), `handles.py` (canonical handles and the allow list), `allowed_toolsets.py` (the closed list of toolsets a text may reach), `inbound.py` (the request's shape), `imsg.py` (finding and calling imsg), `household.py` and `tools.py` (the optional forward), `registration.py`, `plugin.yaml` |
 | `bin/imessage-reply` | sends one iMessage, only to a handle on the allow list; a check that imsg works |
 | `bin/household-forward` | forwards one command from a terminal; prints only whether the answer was delivered |
 | `tests/` | the plugin's and the scripts' tests |
@@ -163,7 +173,7 @@ python3 -m unittest discover -s tests -p 'test_*.py'
 ```
 
 The adapter's suite needs Hermes's own environment (`gateway`, `aiohttp`) and skips without
-it. The full run, 72 tests, is:
+it. The full run, 80 tests, is:
 
 ```sh
 IMESSAGE_SHORTCUTS_TESTS_REQUIRE_HERMES=1 hermes --run-module unittest discover -s tests -p 'test_*.py'

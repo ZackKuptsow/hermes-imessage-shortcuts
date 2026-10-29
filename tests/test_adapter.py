@@ -69,6 +69,7 @@ class AdapterTest(unittest.IsolatedAsyncioTestCase):
         self.addCleanup(shutil.rmtree, self.root, ignore_errors=True)
         self.home = self.root / "profiles/imessage"
         self.write_allow_list(self.home)
+        self.write_settings(self.home, ["imessage_shortcuts", "memory"])
         self.record = self.root / "imsg-calls.jsonl"
         fake_imsg = self.root / "imsg"
         fake_imsg.write_text(
@@ -93,6 +94,12 @@ class AdapterTest(unittest.IsolatedAsyncioTestCase):
     def write_allow_list(home: Path) -> None:
         (home / "data/imessage").mkdir(parents=True, exist_ok=True)
         (home / "data/imessage/zack-handles.txt").write_text(f"{ZACK_PHONE}\n{ZACK_EMAIL}\n")
+
+    @staticmethod
+    def write_settings(home: Path, toolsets: list[str]) -> None:
+        """The profile's config.yaml, saving *toolsets* as the platform's list (ADR 0035)."""
+        home.mkdir(parents=True, exist_ok=True)
+        (home / "config.yaml").write_text(json.dumps({"platform_toolsets": {"imessage_shortcuts": toolsets}}))
 
     def imsg_calls(self) -> list[list[str]]:
         if not self.record.exists():
@@ -197,6 +204,33 @@ class AdapterTest(unittest.IsolatedAsyncioTestCase):
                 self.assertEqual(self.adapter_module.read_startup_settings()[1], self.port)
             finally:
                 reset_hermes_home_override(token)
+
+    # --- which toolsets a text reaches (smart-home ADR 0035) --------------------------------
+
+    def test_start_is_refused_while_a_text_could_reach_more_than_two_toolsets(self):
+        cases = {
+            "a shell beside the two": '{"platform_toolsets": {"imessage_shortcuts": ["imessage_shortcuts", "memory", "terminal"]}}',
+            "no saved list": '{"model": {"provider": "custom"}}',
+            "an MCP server": '{"platform_toolsets": {"imessage_shortcuts": ["memory"]}, "mcp_servers": {"notes": {}}}',
+            "unreadable settings": "platform_toolsets: [unclosed",
+        }
+        for label, text in cases.items():
+            (self.home / "config.yaml").write_text(text)
+            with self.subTest(label), self.assertRaises(self.adapter_module.StartupRefusedError):
+                self.adapter_module.read_startup_settings()
+        (self.home / "config.yaml").unlink()
+        with self.assertRaisesRegex(self.adapter_module.StartupRefusedError, "cannot read"):
+            self.adapter_module.read_startup_settings()
+
+    async def test_with_a_widened_list_connect_fails_and_nothing_listens(self):
+        self.write_settings(self.home, ["imessage_shortcuts", "memory", "file"])
+        adapter = self.adapter_module.ImessageShortcutsAdapter(self.platform_config())
+        self.assertFalse(await adapter.connect())
+        self.assertIsNone(adapter._runner)
+        self.assertEqual(adapter._fatal_error_code, "imessage_shortcuts_refused")
+        self.assertIn("names file", adapter._fatal_error_message)
+        with socket.socket() as probe:
+            probe.bind(("127.0.0.1", self.port))  # free: the adapter never bound it
 
     def platform_config(self):
         from gateway.config import PlatformConfig

@@ -13,7 +13,9 @@ Three walls keep anyone else out, any one of which is enough:
 
 It also refuses to start in any Hermes profile but `imessage`, the texting profile on the
 Mac's Ollama (smart-home ADR 0034). Enabled in the default profile by hand, it stays off
-rather than let that profile's cloud model answer Zack's texts.
+rather than let that profile's cloud model answer Zack's texts. And it refuses to start
+while the profile would let a text reach more than household_forward and memory
+(smart-home ADR 0035, `allowed_toolsets`).
 
 Nothing here logs a text, a handle or the secret.
 """
@@ -24,6 +26,7 @@ import asyncio
 import logging
 from pathlib import Path
 
+import hermes_yaml  # Hermes's own config reader: what parses here parses for the gateway
 from aiohttp import web
 from gateway.config import Platform, PlatformConfig
 from gateway.platforms._shared import get_scoped_secret
@@ -31,9 +34,11 @@ from gateway.platforms.base import BasePlatformAdapter, SendResult
 from gateway.platforms.event import MessageEvent, MessageType
 from gateway.platforms.helpers import MessageDeduplicator, send_chunks, strip_markdown
 from hermes_constants import get_hermes_home
+from ruamel.yaml.error import YAMLError
 
-from . import handles, imsg, inbound
+from . import allowed_toolsets, handles, imsg, inbound
 
+CONFIG_FILE_NAME = "config.yaml"  # the serving profile's settings, under its Hermes home
 DEFAULT_HOST = "127.0.0.1"
 DEFAULT_PORT = 8645
 ENV_ALLOW_ALL = "IMESSAGE_SHORTCUTS_ALLOW_ALL_USERS"
@@ -77,15 +82,36 @@ def check_texting_profile() -> None:
             f"not the one at {home}: disable the plugin there and enable it in the texting profile (README, \"Install\")")
 
 
+def check_profile_toolsets() -> None:
+    """Refuse unless the serving profile lets a text reach household_forward and memory alone.
+
+    Reads the profile's saved settings, the list Hermes resolves the platform's toolsets from.
+
+    Raises:
+        StartupRefusedError: the settings cannot be read, or give a text another toolset
+            (smart-home ADR 0035).
+    """
+    path = get_hermes_home() / CONFIG_FILE_NAME
+    try:
+        config = hermes_yaml.safe_load(path.read_text(encoding="utf-8"))
+    except (OSError, YAMLError) as error:
+        raise StartupRefusedError(f"cannot read {path} to check the platform's toolsets ({type(error).__name__})") from error
+    try:
+        allowed_toolsets.check_platform_toolsets(config, PLATFORM_NAME)
+    except allowed_toolsets.ToolsetsRefusedError as error:
+        raise StartupRefusedError(str(error)) from error
+
+
 def read_startup_settings() -> tuple[str, int, str, tuple[str, ...], Path]:
     """Check the configuration and return the host, port, secret, allow list and imsg path.
 
     Raises:
-        StartupRefusedError: the profile is not the texting profile, the host is not a
-            loopback address, the secret is short, the allow-all switch is on, the allow
-            lists disagree, or imsg is missing.
+        StartupRefusedError: the profile is not the texting profile, a text could reach a
+            toolset beyond the two, the host is not a loopback address, the secret is
+            short, the allow-all switch is on, the allow lists disagree, or imsg is missing.
     """
     check_texting_profile()
+    check_profile_toolsets()
     host = get_scoped_secret(ENV_HOST, DEFAULT_HOST).strip()
     if host not in LOOPBACK_ADDRESSES:
         raise StartupRefusedError(f"{ENV_HOST} must be a loopback address, 127.0.0.1 or ::1 (smart-home ADR 0002)")
