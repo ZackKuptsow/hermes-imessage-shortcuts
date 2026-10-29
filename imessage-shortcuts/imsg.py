@@ -1,7 +1,7 @@
 """Send one iMessage with imsg, and only to a handle on the allow list.
 
-`imsg send --to` needs Automation for Messages alone. Without Full Disk Access, which
-nothing Hermes can launch is given on the Mac Studio (smart-home ADR 0032), imsg cannot
+`imsg send --to` needs Automation for Messages alone. Without Full Disk Access, which the
+gateway's process is never given on the Mac Studio (smart-home ADRs 0032 and 0035), imsg cannot
 read the outgoing row back, so `sent` means Messages accepted the AppleScript call, not
 that the message arrived.
 """
