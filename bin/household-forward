@@ -1,0 +1,68 @@
+#!/usr/bin/env python3
+"""household-forward: pass one of Zack's household commands to the household assistant, as him.
+
+Usage: household-forward COMMAND    (COMMAND "-" reads standard input)
+
+The assistant's answer is texted to Zack's phone and never printed: it can hold the
+partner's data (household-assistant ADR 0077). Prints one line saying whether it was
+delivered. Exits 0 when it was, or when the assistant had nothing to send back; 1 when it
+was refused or not delivered; 2 when the forward could not be attempted.
+
+Reads Zack's handle from ~/.hermes/data/imessage/zack-handles.txt, the function's URL from
+~/.hermes/data/imessage/household-function-url, and the household secret from the login
+Keychain item AHS-09 makes.
+"""
+
+from __future__ import annotations
+
+import argparse
+import importlib
+import importlib.util
+import os
+import sys
+from http import HTTPStatus
+from pathlib import Path
+from types import ModuleType
+
+EXIT_NOT_ATTEMPTED = 2
+EXIT_NOT_DELIVERED = 1
+PACKAGE_NAME = "imessage_shortcuts"
+PLUGIN_DIRECTORY = Path(__file__).resolve().parent.parent / "imessage-shortcuts"
+
+
+def plugin_module(name: str) -> ModuleType:
+    """Import one of the plugin's stdlib modules from the directory beside this script."""
+    if PACKAGE_NAME not in sys.modules:
+        spec = importlib.util.spec_from_file_location(
+            PACKAGE_NAME, PLUGIN_DIRECTORY / "__init__.py", submodule_search_locations=[str(PLUGIN_DIRECTORY)])
+        if spec is None or spec.loader is None:
+            raise ImportError(f"cannot load {PLUGIN_DIRECTORY}")
+        package = importlib.util.module_from_spec(spec)
+        sys.modules[PACKAGE_NAME] = package
+        spec.loader.exec_module(package)
+    return importlib.import_module(f"{PACKAGE_NAME}.{name}")
+
+
+def main() -> int:
+    """Parse the argument, forward, and report."""
+    parser = argparse.ArgumentParser(description="Forward one of Zack's household commands, as him.")
+    parser.add_argument("command", help='the command, word for word, or "-" to read it from standard input')
+    arguments = parser.parse_args()
+    handles, household, imsg = plugin_module("handles"), plugin_module("household"), plugin_module("imsg")
+    hermes_home = handles.texting_profile_home(os.environ.get("HERMES_HOME"), Path.home())
+    command = sys.stdin.read() if arguments.command == "-" else arguments.command
+    try:
+        settings = household.ForwardSettings(
+            allow_list_path=hermes_home / handles.ALLOW_LIST_RELATIVE_PATH,
+            function_url_path=hermes_home / household.FUNCTION_URL_RELATIVE_PATH,
+            imsg_path=imsg.find_imsg(os.environ.get("IMESSAGE_SHORTCUTS_IMSG")))
+        outcome = household.forward_household_command(command, settings)
+    except (household.ForwardError, imsg.ImsgMissingError) as error:
+        print(f"Not forwarded: {error}", file=sys.stderr)
+        return EXIT_NOT_ATTEMPTED
+    print(outcome.summary)
+    return 0 if outcome.delivered or outcome.status == HTTPStatus.NO_CONTENT else EXIT_NOT_DELIVERED
+
+
+if __name__ == "__main__":
+    sys.exit(main())

@@ -1,0 +1,36 @@
+name: imessage-shortcuts
+label: iMessage (Shortcuts)
+kind: platform
+version: 0.1.0
+description: >
+  Text your Hermes over iMessage from a Mac, with no Full Disk Access. A Shortcuts
+  Message automation posts each incoming text to a listener on the loopback address,
+  and imsg sends the answer back from the Mac's Messages account. Only handles on the
+  allow list get in or get a reply. Also provides household_forward, an optional tool
+  that passes a command to a second service and reports only whether its answer was
+  delivered.
+author: Zack Kuptsow
+provides_tools:
+  - household_forward
+requires_env:
+  - name: IMESSAGE_SHORTCUTS_SECRET
+    description: "Shared secret the Shortcut sends in X-Hermes-Secret (at least 32 characters)"
+    prompt: "Shortcut secret"
+    password: true
+  - name: IMESSAGE_SHORTCUTS_ALLOWED_USERS
+    description: "Allowed handles, comma-separated, exactly as in the profile's data/imessage/zack-handles.txt"
+    prompt: "Allowed handles"
+    password: false
+optional_env:
+  - name: IMESSAGE_SHORTCUTS_HOST
+    description: "Loopback address to listen on: 127.0.0.1 (default) or ::1; nothing else is accepted"
+    prompt: "Listen address"
+    password: false
+  - name: IMESSAGE_SHORTCUTS_PORT
+    description: "Port to listen on (default 8645)"
+    prompt: "Port"
+    password: false
+  - name: IMESSAGE_SHORTCUTS_IMSG
+    description: "Path to imsg (default: Homebrew's, then PATH)"
+    prompt: "imsg path"
+    password: false

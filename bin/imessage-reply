@@ -1,0 +1,67 @@
+#!/usr/bin/env python3
+"""imessage-reply: send one iMessage to Zack, and to nobody else.
+
+Usage: imessage-reply [--to HANDLE] TEXT    (TEXT "-" reads standard input)
+
+The recipient must be on ~/.hermes/data/imessage/zack-handles.txt; with one handle there,
+--to may be left out. Prints `sent`, or why not, and never the text; exits 0 only when
+imsg reports `sent`. Stage one's webhook route replies with it, and AHS-10 uses it to
+check imsg and the Automation grant before anything else.
+"""
+
+from __future__ import annotations
+
+import argparse
+import importlib
+import importlib.util
+import os
+import sys
+from pathlib import Path
+from types import ModuleType
+
+EXIT_NOT_SENT = 1
+EXIT_REFUSED = 2
+PACKAGE_NAME = "imessage_shortcuts"
+PLUGIN_DIRECTORY = Path(__file__).resolve().parent.parent / "imessage-shortcuts"
+
+
+def plugin_module(name: str) -> ModuleType:
+    """Import one of the plugin's stdlib modules from the directory beside this script."""
+    if PACKAGE_NAME not in sys.modules:
+        spec = importlib.util.spec_from_file_location(
+            PACKAGE_NAME, PLUGIN_DIRECTORY / "__init__.py", submodule_search_locations=[str(PLUGIN_DIRECTORY)])
+        if spec is None or spec.loader is None:
+            raise ImportError(f"cannot load {PLUGIN_DIRECTORY}")
+        package = importlib.util.module_from_spec(spec)
+        sys.modules[PACKAGE_NAME] = package
+        spec.loader.exec_module(package)
+    return importlib.import_module(f"{PACKAGE_NAME}.{name}")
+
+
+def main() -> int:
+    """Parse the arguments, send, and report."""
+    parser = argparse.ArgumentParser(description="Send one iMessage to a handle on Zack's allow list.")
+    parser.add_argument("--to", help="the recipient; needed only when the allow list has more than one handle")
+    parser.add_argument("text", help='the message, or "-" to read it from standard input')
+    arguments = parser.parse_args()
+    handles, imsg = plugin_module("handles"), plugin_module("imsg")
+    hermes_home = handles.texting_profile_home(os.environ.get("HERMES_HOME"), Path.home())
+    text = sys.stdin.read() if arguments.text == "-" else arguments.text
+    try:
+        allowed = handles.read_allowed_handles(hermes_home / handles.ALLOW_LIST_RELATIVE_PATH)
+        if arguments.to is None and len(allowed) != 1:
+            raise imsg.SendRefusedError("the allow list has more than one handle; name one with --to")
+        imsg_path = imsg.find_imsg(os.environ.get("IMESSAGE_SHORTCUTS_IMSG"))
+        outcome = imsg.send_message(text, arguments.to or allowed[0], allowed, imsg_path)
+    except (handles.AllowListError, imsg.ImsgMissingError, imsg.SendRefusedError) as error:
+        print(f"not sent: {error}", file=sys.stderr)
+        return EXIT_REFUSED
+    if outcome.delivered:
+        print("sent")
+        return 0
+    print(f"not sent: imsg reported {outcome.disposition}", file=sys.stderr)
+    return EXIT_NOT_SENT
+
+
+if __name__ == "__main__":
+    sys.exit(main())

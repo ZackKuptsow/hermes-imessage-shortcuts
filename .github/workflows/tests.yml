@@ -1,0 +1,46 @@
+name: tests
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  without-hermes:
+    name: suites that need no Hermes (system python3)
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Run the suites
+        run: python3 -m unittest discover -s tests -p 'test_*.py' -v 2>&1 | tee test-output.txt
+      - name: Fail if the run was smaller than the suites it should cover
+        # The adapter's suite skips without Hermes; everything else must run, and the
+        # summary must say so. A run that found no tests would otherwise read as green.
+        run: |
+          summary=$(grep -E '^OK|^FAILED' test-output.txt | tail -1)
+          ran=$(grep -Eo 'Ran [0-9]+ tests' test-output.txt | grep -Eo '[0-9]+')
+          echo "ran $ran tests: $summary"
+          test "$ran" -ge 40
+          case "$summary" in *skipped=*) ;; *) echo "expected the adapter suite to skip here"; exit 1;; esac
+
+  with-hermes:
+    name: every suite, inside Hermes Agent's own environment
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install Hermes Agent
+        run: curl -fsSL https://hermes-agent.nousresearch.com/install.sh | bash
+      - name: Run every suite, the adapter's included
+        env:
+          IMESSAGE_SHORTCUTS_TESTS_REQUIRE_HERMES: "1"
+        run: |
+          export PATH="$HOME/.local/bin:$HOME/.hermes/bin:$PATH"
+          hermes --run-module unittest discover -s tests -p 'test_*.py' -v 2>&1 | tee test-output.txt
+          summary=$(grep -E '^OK|^FAILED' test-output.txt | tail -1)
+          ran=$(grep -Eo 'Ran [0-9]+ tests' test-output.txt | grep -Eo '[0-9]+')
+          echo "ran $ran tests: $summary"
+          test "$ran" -ge 70
+          case "$summary" in *skipped=*) echo "the adapter suite skipped: this is not Hermes's interpreter"; exit 1;; esac
