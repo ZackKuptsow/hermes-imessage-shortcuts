@@ -34,7 +34,8 @@ he runs. The plugin works without that tool, and both are a one-line change
 Reading the Messages database directly needs Full Disk Access for whatever process reads it.
 For an agent gateway that runs under launchd and can launch a shell, that is a broad grant.
 The automation inverts it: Messages hands each text over, one HTTP request at a time, and
-nothing Hermes launches is given Full Disk Access. The one permission the reply path needs is
+nothing Hermes launches is handed the database: the gateway's process is never given Full
+Disk Access. The one permission the reply path needs is
 Automation of Messages, for `imsg send`, and macOS asks for it the first time a reply goes out.
 
 ## What it refuses
@@ -58,14 +59,29 @@ runs a cloud model and his texting profile runs a local one, and this is what ke
 `hermes plugins enable` in the wrong profile from handing his texts to the cloud model. The
 profile name is `TEXTING_PROFILE` in `handles.py`.
 
-And a guard on what a text can do: the adapter reads the profile's `config.yaml` at start
-and refuses to run unless the platform has a saved toolsets list
-(`platform_toolsets.imessage_shortcuts`) naming nothing beyond `imessage_shortcuts` and
-`memory`, and no MCP server is configured (Hermes merges those into every platform's
-toolsets, and with no saved list it hands the platform every core toolset). A terminal, a
-browser or a file tool reached by text would act with whatever access the gateway's process
-has, so the list is closed rather than open. `allowed_toolsets.py` holds the check; save the
-list with
+And guards on what a text can do. A terminal, a browser or a file tool reached by text would
+act with whatever access the gateway's process has, so a text reaches two toolsets,
+`imessage_shortcuts` and `memory`, and nothing else:
+
+- The adapter reads the profile's `config.yaml` the way the gateway does (managed overlay and
+  `${VAR}` expansion applied) and refuses unless the platform's saved toolsets list
+  (`platform_toolsets.imessage_shortcuts`) is exactly those two, no MCP server is configured
+  (Hermes merges those into every platform's toolsets), and `memory.provider` is the built-in
+  store (an external provider brings its own tools in with `memory`). With no saved list
+  Hermes would hand the platform every core toolset. `allowed_toolsets.py` holds this part.
+- It then asks Hermes's own resolver which toolsets it turns on for the platform, and refuses
+  any beyond the two: a toolset shipped in a Hermes upgrade, or another enabled plugin's, is
+  turned on without appearing in any setting.
+- Both run at start, which refuses to listen, and again for every text, which is answered
+  `503` and never reaches the gateway: the gateway rereads `config.yaml` each turn, so a list
+  widened while it runs would otherwise reach the next text.
+- Every text's toolsets are pinned to the two (`toolsets_for_source`), whatever the saved
+  list says by then.
+- A text's slash command runs only if it is `/new`, `/reset`, `/stop`, or `/approve` or
+  `/cancel` in answer to `/new`'s confirmation. Any other, `/model`, `/kanban` or a skill's
+  command among them, reaches the model as words.
+
+Save the list with
 `hermes -p imessage config set platform_toolsets.imessage_shortcuts '["imessage_shortcuts","memory"]'`.
 
 ## What you need
@@ -118,16 +134,17 @@ list with
 
    The adapter compares the two at start and refuses to run while they disagree.
 
-5. **Toolsets.** The platform gets whatever `platform_toolsets.imessage_shortcuts` lists in the
-   profile's config. Give it the toolsets you want a text to be able to use; the author grants
-   his full set.
+5. **Toolsets.** Save the platform's list as exactly `imessage_shortcuts` and `memory`, the
+   command under "What it refuses"; the adapter refuses to start with any other.
 
 6. **Restart the gateway** from another terminal (`hermes gateway restart`; a session running
    inside the gateway ends with it). Then `lsof -nP -iTCP:8645 -sTCP:LISTEN` should show
    `127.0.0.1` and nothing else.
 
-7. **The automation**, in Shortcuts on the Mac: trigger Message, sender set to your handle,
-   Run Immediately, Allow Running When Locked.
+7. **The automation**, in Shortcuts on the Mac: trigger Message, sender set to your contact
+   card picked from Contacts, Message Contains left empty, Run Immediately, Allow Running When
+   Locked. On macOS 26, with a typed handle as the sender the trigger would not save with
+   Message Contains empty, and any text there (a single space) drops every one-word text.
    - Format Date: ISO 8601, with the time.
    - Get Contents of URL: `POST` `http://127.0.0.1:8645/imessage`, header `X-Hermes-Secret`,
      a JSON body of `sender` (the sender's handle, not the contact's name), `sent_at` and `text`.
@@ -173,7 +190,7 @@ python3 -m unittest discover -s tests -p 'test_*.py'
 ```
 
 The adapter's suite needs Hermes's own environment (`gateway`, `aiohttp`) and skips without
-it. The full run, 80 tests, is:
+it. The full run, 96 tests, is:
 
 ```sh
 IMESSAGE_SHORTCUTS_TESTS_REQUIRE_HERMES=1 hermes --run-module unittest discover -s tests -p 'test_*.py'

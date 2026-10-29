@@ -157,8 +157,10 @@ class AdapterTest(unittest.IsolatedAsyncioTestCase):
                     self.adapter_module.read_startup_settings()
 
     def test_start_accepts_the_allow_list_in_another_written_form(self):
-        host, port, _, allowed, _ = self.adapter_module.read_startup_settings()
-        self.assertEqual((host, port, allowed), ("127.0.0.1", self.port, (ZACK_PHONE, ZACK_EMAIL)))
+        settings = self.adapter_module.read_startup_settings()
+        self.assertEqual((settings.host, settings.port, settings.allowed),
+                         ("127.0.0.1", self.port, (ZACK_PHONE, ZACK_EMAIL)))
+        self.assertNotIn(SECRET, repr(settings))
 
     # --- which profile it serves (smart-home ADR 0034) ------------------------------------
 
@@ -201,26 +203,65 @@ class AdapterTest(unittest.IsolatedAsyncioTestCase):
                 reset_hermes_home_override(token)
             token = set_hermes_home_override(self.home)
             try:
-                self.assertEqual(self.adapter_module.read_startup_settings()[1], self.port)
+                self.assertEqual(self.adapter_module.read_startup_settings().port, self.port)
             finally:
                 reset_hermes_home_override(token)
 
     # --- which toolsets a text reaches (smart-home ADR 0035) --------------------------------
 
     def test_start_is_refused_while_a_text_could_reach_more_than_two_toolsets(self):
+        the_two = '"imessage_shortcuts": ["imessage_shortcuts", "memory"]'
         cases = {
-            "a shell beside the two": '{"platform_toolsets": {"imessage_shortcuts": ["imessage_shortcuts", "memory", "terminal"]}}',
+            "a shell beside the two": '{"platform_toolsets": {"imessage_shortcuts": '
+                                      '["imessage_shortcuts", "memory", "terminal"]}}',
             "no saved list": '{"model": {"provider": "custom"}}',
-            "an MCP server": '{"platform_toolsets": {"imessage_shortcuts": ["memory"]}, "mcp_servers": {"notes": {}}}',
-            "unreadable settings": "platform_toolsets: [unclosed",
+            "an MCP server": f'{{"platform_toolsets": {{{the_two}}}, "mcp_servers": {{"notes": {{}}}}}}',
+            "an external memory provider": f'{{"platform_toolsets": {{{the_two}}}, '
+                                           '"memory": {"provider": "retaindb"}}',
         }
         for label, text in cases.items():
             (self.home / "config.yaml").write_text(text)
             with self.subTest(label), self.assertRaises(self.adapter_module.StartupRefusedError):
                 self.adapter_module.read_startup_settings()
+
+    def test_start_is_refused_while_a_managed_overlay_adds_what_the_profiles_file_does_not(self):
+        managed = self.root / "managed"
+        managed.mkdir()
+        (managed / "config.yaml").write_text('{"mcp_servers": {"notes": {"command": "notes-server"}}}')
+        with mock.patch.dict(os.environ, {"HERMES_MANAGED_DIR": str(managed)}), \
+                self.assertRaisesRegex(self.adapter_module.StartupRefusedError, "mcp_servers"):
+            self.adapter_module.read_startup_settings()
+
+    def test_start_is_refused_while_hermess_resolver_would_add_a_toolset_the_saved_list_never_names(self):
+        from hermes_cli import tools_config
+
+        with mock.patch.object(tools_config, "_RECENTLY_SHIPPED_TOOLSETS", frozenset({"web"})), \
+                self.assertRaisesRegex(self.adapter_module.StartupRefusedError, "Hermes resolves web"):
+            self.adapter_module.read_startup_settings()
+
+    def test_settings_that_cannot_be_read_are_refused_without_echoing_them(self):
+        cases = {
+            "unclosed YAML": b"platform_toolsets: [unclosed",
+            "a date that is no date": b"stamp: 2026-13-45\n",
+            "a tag that does not parse": b"count: !!int abc\n",
+            "bytes that are not UTF-8": b"name: \xff\xfe\n",
+        }
+        for label, data in cases.items():
+            (self.home / "config.yaml").write_bytes(data)
+            with self.subTest(label), \
+                    self.assertRaisesRegex(self.adapter_module.StartupRefusedError, "cannot read") as raised:
+                self.adapter_module.read_startup_settings()
+            self.assertNotIn("unclosed", str(raised.exception))
         (self.home / "config.yaml").unlink()
         with self.assertRaisesRegex(self.adapter_module.StartupRefusedError, "cannot read"):
             self.adapter_module.read_startup_settings()
+
+    async def test_with_settings_that_raise_a_value_error_connect_refuses_rather_than_retrying(self):
+        (self.home / "config.yaml").write_bytes(b"stamp: 2026-13-45\n")
+        adapter = self.adapter_module.ImessageShortcutsAdapter(self.platform_config())
+        self.assertFalse(await adapter.connect())
+        refusal = (adapter._fatal_error_code, adapter._fatal_error_retryable)
+        self.assertEqual(refusal, ("imessage_shortcuts_refused", False))
 
     async def test_with_a_widened_list_connect_fails_and_nothing_listens(self):
         self.write_settings(self.home, ["imessage_shortcuts", "memory", "file"])
@@ -231,6 +272,25 @@ class AdapterTest(unittest.IsolatedAsyncioTestCase):
         self.assertIn("names file", adapter._fatal_error_message)
         with socket.socket() as probe:
             probe.bind(("127.0.0.1", self.port))  # free: the adapter never bound it
+
+    async def test_every_text_gets_the_two_toolsets_whatever_the_saved_list_says_now(self):
+        adapter = await self.start_adapter()
+        self.write_settings(self.home, ["imessage_shortcuts", "memory", "terminal"])
+        source = adapter.build_source(chat_id=ZACK_PHONE, chat_type="dm", user_id=ZACK_PHONE)
+        self.assertEqual(adapter.toolsets_for_source(source), ["imessage_shortcuts", "memory"])
+
+    async def test_a_text_is_refused_once_the_profile_widens_after_start(self):
+        adapter = await self.start_adapter()
+        self.write_settings(self.home, ["imessage_shortcuts", "memory", "terminal"])
+        self.assertEqual(await self.post(self.message()), 503)
+        adapter.handle_message.assert_not_awaited()
+
+    def test_the_allowed_toolsets_agree_with_the_tool_and_with_hermess_memory_store(self):
+        from agent.memory_provider import CORE_MEMORY_PROVIDER_SENTINELS
+
+        allowed_toolsets = plugin_module("allowed_toolsets")
+        self.assertIn(plugin_module("tools").TOOLSET, allowed_toolsets.ALLOWED_TOOLSETS)
+        self.assertEqual(allowed_toolsets.CORE_MEMORY_PROVIDERS, CORE_MEMORY_PROVIDER_SENTINELS)
 
     def platform_config(self):
         from gateway.config import PlatformConfig
@@ -250,6 +310,35 @@ class AdapterTest(unittest.IsolatedAsyncioTestCase):
         (call,) = adapter.handle_message.await_args_list
         event = call.args[0]
         self.assertEqual((event.text, event.source.chat_id, event.source.user_id), (TEXT, ZACK_PHONE, ZACK_PHONE))
+
+    async def handed_events(self, adapter, texts: list[str]) -> list:
+        """Post each of *texts* from Zack, then return the events the gateway was handed."""
+        for text in texts:
+            self.assertEqual(await self.post(self.message(text=text)), 202)
+        await asyncio.sleep(0.05)
+        return [call.args[0] for call in adapter.handle_message.await_args_list]
+
+    async def test_a_slash_command_a_text_may_not_run_reaches_the_model_as_words(self):
+        adapter = await self.start_adapter()
+        texts = ["/kanban create probe --body-file /etc/hosts", "/model some-cloud-model", "/restart", "/debug",
+                 "/always", "/etc/hosts"]
+        for text, event in zip(texts, await self.handed_events(adapter, texts), strict=True):
+            with self.subTest(text=text):
+                self.assertEqual(event.text, text)
+                self.assertFalse(event.allow_gateway_control)
+                self.assertFalse(event.is_command())
+
+    async def test_new_reset_stop_and_the_confirm_replies_stay_commands(self):
+        adapter = await self.start_adapter()
+        texts = ["/new", "/reset", "/stop", "/approve", "/cancel"]
+        for text, event in zip(texts, await self.handed_events(adapter, texts), strict=True):
+            with self.subTest(text=text):
+                self.assertEqual(event.get_command(), text[1:])
+
+    async def test_a_plain_text_keeps_gateway_control_for_a_confirm_reply(self):
+        adapter = await self.start_adapter()
+        (event,) = await self.handed_events(adapter, ["yes"])
+        self.assertTrue(event.allow_gateway_control)
 
     async def test_the_partners_text_never_reaches_the_gateway(self):
         adapter = await self.start_adapter()
@@ -300,6 +389,19 @@ class AdapterTest(unittest.IsolatedAsyncioTestCase):
         self.assertTrue((await adapter.send(ZACK_PHONE, "word " * 1500)).success)
         self.assertGreater(len(self.imsg_calls()), 1)
 
+
+    async def test_after_a_refused_reconnect_nothing_is_sent(self):
+        adapter = await self.start_adapter()
+        self.write_settings(self.home, ["imessage_shortcuts", "memory", "terminal"])
+        self.assertFalse(await adapter.connect(is_reconnect=True))
+        self.assertFalse((await adapter.send(ZACK_PHONE, "still here")).success)
+        self.assertEqual(self.imsg_calls(), [])
+
+    async def test_after_disconnect_nothing_is_sent(self):
+        adapter = await self.start_adapter()
+        await adapter.disconnect()
+        self.assertFalse((await adapter.send(ZACK_PHONE, "still here")).success)
+        self.assertEqual(self.imsg_calls(), [])
 
 if __name__ == "__main__":
     unittest.main()

@@ -27,8 +27,8 @@ from pathlib import Path
 from . import handles, imsg
 
 FUNCTION_URL_RELATIVE_PATH = Path("data/imessage/household-function-url")  # under the Hermes home
-# AHS-09's login-Keychain item, read where it is and never copied (smart-home ADR 0011's
-# pattern). The name is proposed here; AHS-09 records it when the item is made.
+# The login-Keychain item, read where it is and never copied (smart-home ADR 0011's pattern;
+# the name is settled by smart-home ADR 0036).
 KEYCHAIN_SERVICE = "household-assistant-imessage-secret"
 REQUEST_TIMEOUT_SECONDS = 15  # the function gives up at 10
 SECRET_HEADER = "X-Household-Assistant-Secret"  # noqa: S105 -- a header name, not a secret
