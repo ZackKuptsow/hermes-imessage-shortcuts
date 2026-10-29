@@ -74,7 +74,7 @@ def check_texting_profile() -> None:
     if (home.parent.name, home.name) != (handles.PROFILES_DIRECTORY, handles.TEXTING_PROFILE):
         raise StartupRefusedError(
             f"this platform serves the {handles.TEXTING_PROFILE} profile alone (smart-home ADR 0034), "
-            f"not the one at {home}: disable the plugin there and run hermes/mac-studio/setup.sh")
+            f"not the one at {home}: disable the plugin there and enable it in the texting profile (README, \"Install\")")
 
 
 def read_startup_settings() -> tuple[str, int, str, tuple[str, ...], Path]:

@@ -104,7 +104,7 @@ def texting_profile_home(hermes_home: str | None, user_home: Path) -> Path:
     """The texting profile's home, whichever Hermes home a script was started from.
 
     Inside a profile's session HERMES_HOME is that profile's own home, so the Hermes root is
-    what precedes its first `profiles` directory, as in hermes/mac-studio/setup.sh.
+    what precedes its first `profiles` directory, as the author's setup script does.
 
     Args:
         hermes_home: $HERMES_HOME; unset or empty means the root is ~/.hermes.

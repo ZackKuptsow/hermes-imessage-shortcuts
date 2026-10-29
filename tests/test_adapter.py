@@ -1,6 +1,6 @@
 """The adapter over real HTTP on the loopback address, under Hermes's own interpreter.
 
-Skipped under any other Python (the dotfiles test runner's python3 has no `gateway`);
+Skipped under any other Python (a plain python3 has no `gateway`);
 `setup.sh` runs this suite with Hermes's interpreter before it links the plugin.
 """
 
