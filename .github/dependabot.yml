@@ -1,0 +1,8 @@
+# The workflow's actions are pinned to commit SHAs; Dependabot proposes each bump as a pull
+# request, and a major bump is reviewed before it is merged.
+version: 2
+updates:
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: weekly
