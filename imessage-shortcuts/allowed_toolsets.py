@@ -1,9 +1,9 @@
 """The toolsets a text may reach: the plugin's household_forward and the profile's memory.
 
-Ghostty holds Full Disk Access on the Mac Studio, and macOS runs a launched app with that
-app's own grants, so any tool that can run a command, click, or write a file another
-process runs reaches the partner's texts in Messages' database. A text therefore reaches
-two toolsets and no others (smart-home ADR 0035).
+A tool that can run a command, click, or write a file another process runs can launch an
+app, and macOS runs a launched app with that app's own grants, Full Disk Access included,
+which reaches everyone's texts in Messages' database. A text therefore reaches two toolsets
+and no others (smart-home ADR 0035).
 
 This module checks the three settings a text's reach is built from: the platform's saved
 list (with none, Hermes falls back to a composite of every core toolset), the MCP servers
