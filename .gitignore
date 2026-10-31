@@ -2,3 +2,6 @@ __pycache__/
 *.pyc
 .pytest_cache/
 .DS_Store
+
+# Session working files (research notes, ticket drafts): never meant for git.
+.claude/
