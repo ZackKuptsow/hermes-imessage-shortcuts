@@ -2,6 +2,10 @@
 
 from __future__ import annotations
 
+import contextlib
+import importlib.machinery
+import importlib.util
+import io
 import json
 import os
 import shutil
@@ -10,11 +14,22 @@ import subprocess
 import sys
 import tempfile
 import unittest
+import urllib.error
+from collections.abc import Callable
+from http import HTTPStatus
 from pathlib import Path
+from types import ModuleType
+from typing import NoReturn
+from unittest import mock
 
-from support import PARTNER_PHONE, ZACK_EMAIL, ZACK_PHONE
+from support import PARTNER_PHONE, ZACK_EMAIL, ZACK_PHONE, RecordingRun
 
 BIN = Path(__file__).resolve().parent.parent / "bin"
+FUNCTION_URL = "https://function.example.invalid/"
+HOUSEHOLD_ANSWER = "Added oat milk. The list: oat milk, her prescription refill."
+HOUSEHOLD_SECRET = "h" * 64
+IMSG_NOT_STARTED = '{"status":"error","disposition":"not_started"}'
+SENT_AT = "2026-10-27T13:14:05-04:00"
 
 
 class ScriptTest(unittest.TestCase):
@@ -90,6 +105,89 @@ class HouseholdForwardTest(ScriptTest):
         self.assertEqual((completed.returncode, self.imsg_calls()), (2, []))
         self.assertIn("Not forwarded", completed.stderr)
         self.assertNotIn("oat milk", completed.stdout + completed.stderr)
+
+
+def load_script(name: str) -> ModuleType:
+    """A script from bin/ as a module, so its main() can run in this process."""
+    loader = importlib.machinery.SourceFileLoader(name.replace("-", "_"), str(BIN / name))
+    module = importlib.util.module_from_spec(importlib.util.spec_from_loader(loader.name, loader))
+    loader.exec_module(module)
+    return module
+
+
+class StubResponse(io.BytesIO):
+    """urlopen's response as post_command reads it: a readable body with a status."""
+
+    def __init__(self, status: int, body: str):
+        super().__init__(body.encode("utf-8"))
+        self.status = status
+
+
+def function_answering(status: int, body: str = "") -> Callable[..., StubResponse]:
+    """An opener standing in for urlopen: the function answers *status*, raising for an error as urlopen does."""
+    def opener(request, timeout):
+        if status >= HTTPStatus.BAD_REQUEST:
+            raise urllib.error.HTTPError(request.full_url, status, "refused", hdrs=None, fp=None)
+        return StubResponse(status, body)
+    return opener
+
+
+def function_unreachable(request, timeout) -> NoReturn:
+    """An opener standing in for urlopen when the function cannot be reached at all."""
+    raise urllib.error.URLError("connection refused")
+
+
+class HouseholdForwardExitCodeTest(ScriptTest):
+    """The exit code for each answer the function can give.
+
+    Run in this process, not as a command: the forward posts only to an https URL and reads
+    the secret from the login Keychain, neither of which a test can stand in for from outside.
+    Only those edges and imsg are replaced; the script's main() and the forward run as shipped.
+    """
+
+    def setUp(self):
+        super().setUp()
+        self.allow(ZACK_PHONE)
+        (self.home / "data/imessage/household-function-url").write_text(FUNCTION_URL + "\n")
+        self.script = load_script("household-forward")
+
+    def run_main(self, opener: Callable[..., StubResponse], imsg_run: RecordingRun) -> tuple[int, str]:
+        """household-forward's main() for one command, against a function answering through *opener*.
+
+        Returns the exit code and everything printed, standard output and standard error together.
+        """
+        household = self.script.plugin_module("household")
+        shipped_forward = household.forward_household_command
+
+        def forward_with_stubbed_edges(text, settings):
+            return shipped_forward(text, settings, secret_reader=lambda: HOUSEHOLD_SECRET, opener=opener,
+                                   run=imsg_run, clock=lambda: SENT_AT)
+
+        printed = io.StringIO()
+        with contextlib.ExitStack() as stack:
+            stack.enter_context(mock.patch.object(household, "forward_household_command", forward_with_stubbed_edges))
+            stack.enter_context(mock.patch.dict(os.environ, self.environment))
+            stack.enter_context(mock.patch.object(sys, "argv", ["household-forward", "add oat milk"]))
+            stack.enter_context(contextlib.redirect_stdout(printed))
+            stack.enter_context(contextlib.redirect_stderr(printed))
+            exit_code = self.script.main()
+        return exit_code, printed.getvalue()
+
+    def test_exits_zero_only_when_delivered_or_there_was_nothing_to_send(self):
+        cases = (
+            ("an answer, sent", function_answering(200, HOUSEHOLD_ANSWER), RecordingRun(), 0),
+            ("no content", function_answering(204), RecordingRun(), 0),
+            ("a blank answer", function_answering(200, " \n"), RecordingRun(), 0),
+            ("a refusal", function_answering(403), RecordingRun(), 1),
+            ("an answer whose send failed", function_answering(200, HOUSEHOLD_ANSWER),
+             RecordingRun(stdout=IMSG_NOT_STARTED, returncode=1), 1),
+            ("no answer at all: the function is unreachable", function_unreachable, RecordingRun(), 1),
+        )
+        for case, opener, imsg_run, expected_exit_code in cases:
+            with self.subTest(case=case):
+                exit_code, printed = self.run_main(opener, imsg_run)
+                self.assertEqual(exit_code, expected_exit_code)
+                self.assertNotIn("oat milk", printed)
 
 
 if __name__ == "__main__":
