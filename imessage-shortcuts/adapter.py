@@ -88,7 +88,7 @@ class DropReason(enum.Enum):
     SENDER = "sender"  # on the send endpoint, the recipient
 
 
-def dropped(reason: DropReason) -> web.Response:
+def dropped_response(reason: DropReason) -> web.Response:
     """The 204 for a dropped request, saying why. No other answer carries the header."""
     return web.Response(status=204, headers={DROPPED_HEADER: reason.value})
 
@@ -324,16 +324,16 @@ class ImessageShortcutsAdapter(BasePlatformAdapter):
             sender = ""
         if sender not in settings.allowed:
             logger.warning(f"{LOG_PREFIX} dropped a text from a sender not on the allow list")
-            return dropped(DropReason.SENDER)
+            return dropped_response(DropReason.SENDER)
         try:
             await asyncio.to_thread(check_profile_toolsets)
         except allowed_toolsets.ToolsetsRefusedError as error:
             logger.error(f"{LOG_PREFIX} refused a text: {error}")
             return web.Response(status=503)
         if not posted.text.strip():
-            return dropped(DropReason.EMPTY)
+            return dropped_response(DropReason.EMPTY)
         if self._deduplicator.is_duplicate(posted.key()):
-            return dropped(DropReason.DUPLICATE)
+            return dropped_response(DropReason.DUPLICATE)
         message_id = posted.key()[:16]
         source = self.build_source(chat_id=sender, chat_name="iMessage", chat_type="dm", user_id=sender,
                                    user_name="Zack", message_id=message_id)
@@ -353,7 +353,8 @@ class ImessageShortcutsAdapter(BasePlatformAdapter):
         text. 202 when imsg reported `sent`; 502 when it did not, with imsg's disposition in
         a JSON body. No session, no duplicate check and no toolset check: this is a send,
         not a text to Hermes, and the alarm about a widened profile, whose texts the
-        ingress answers 503, must still go out.
+        ingress answers 503, must still go out. That holds until the next connect, whose
+        start checks refuse the profile and leave both routes answering 503.
         """
         settings = self._admit(request)
         if isinstance(settings, web.Response):
@@ -365,9 +366,9 @@ class ImessageShortcutsAdapter(BasePlatformAdapter):
             return web.Response(status=400)
         sent = await self._send_text(settings, send_request.to, send_request.text)
         if isinstance(sent.refusal, imsg.RecipientRefusedError):
-            return dropped(DropReason.SENDER)
+            return dropped_response(DropReason.SENDER)
         if isinstance(sent.refusal, imsg.EmptyTextRefusedError):
-            return dropped(DropReason.EMPTY)
+            return dropped_response(DropReason.EMPTY)
         if not sent.result.success:
             return web.json_response({"disposition": sent.disposition or imsg.DISPOSITION_UNKNOWN}, status=502)
         logger.info(f"{LOG_PREFIX} sent a text for a loopback caller")
@@ -384,7 +385,7 @@ class ImessageShortcutsAdapter(BasePlatformAdapter):
     async def _send_text(self, settings: StartupSettings, handle: str, content: str) -> TextSent:
         """Send *content* to *handle* as plain text, chunked, each chunk through imsg off the event loop.
 
-        The one way a text leaves, for a reply and the send endpoint alike. imsg.send_message
+        The adapter's one way out, for a reply and the send endpoint alike. imsg.send_message
         refuses a handle off the allow list and an empty text; the first chunk that fails
         stops the rest.
         """

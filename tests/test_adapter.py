@@ -516,11 +516,36 @@ class AdapterTest(unittest.IsolatedAsyncioTestCase):
     async def test_the_alarm_about_a_widened_profile_still_goes_out(self):
         # A profile widened after start has every text answered 503, and n8n alarms on that
         # 503 through this endpoint; a text's toolset check here would silence the alarm.
+        # The next connect refuses the profile outright (the not-serving test above).
         await self.start_adapter()
         self.write_settings(self.home, WIDENED_TOOLSETS)
         self.assertEqual(await self.post(self.message()), 503)
         self.assertEqual((await self.send_request(self.alarm()))[:2], (202, None))
         self.assertEqual(len(self.imsg_calls()), 1)
+
+    async def test_a_repeated_send_goes_out_again_since_a_retry_is_no_duplicate(self):
+        # n8n retries an alarm whose send failed with the same body; a duplicate check here
+        # would drop the retry, and the alarm would never arrive.
+        await self.start_adapter()
+        answers = [await self.send_request(self.alarm()), await self.send_request(self.alarm())]
+        self.assertEqual([answer[:2] for answer in answers], [(202, None), (202, None)])
+        self.assertEqual(len(self.imsg_calls()), 2)
+
+    async def test_the_send_endpoint_never_logs_the_text_a_handle_or_the_secret(self):
+        await self.start_adapter()
+        with self.assertLogs("imessage_shortcuts", level="DEBUG") as logged:
+            statuses = [(await self.send_request(self.alarm(to="+1 (555) 010-0199")))[0],
+                        (await self.send_request(self.alarm(to=PARTNER_PHONE)))[0],
+                        (await self.send_request(self.alarm(text="  ")))[0],
+                        (await self.send_request(None, raw=json.dumps({"to": ZACK_PHONE}).encode()))[0],
+                        (await self.send_request(self.alarm(), secret=SECRET[:-1] + "x"))[0]]
+            self.fake_imsg_answers(IMSG_NOT_STARTED, exit_code=1)
+            statuses.append((await self.send_request(self.alarm()))[0])
+        self.assertEqual(statuses, [202, 204, 204, 400, 401, 502])  # every path that logs was taken
+        for record in logged.records:
+            for kept_out in (ALARM, "5550100199", "010-0199", "5550100142", SECRET, SECRET[:-1]):
+                with self.subTest(message=record.getMessage()):
+                    self.assertNotIn(kept_out, record.getMessage())
 
     async def test_imsg_not_sending_is_a_502_with_its_disposition_and_never_the_text(self):
         self.fake_imsg_answers(IMSG_NOT_STARTED, exit_code=1)

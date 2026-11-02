@@ -67,8 +67,11 @@ through gate 3: a recipient off the allow list is a `204` with `X-Imessage-Dropp
 and an empty text one with `empty`, and imsg never runs for either. `202` means imsg
 reported `sent`. `502` means it did not, with imsg's word for why in a JSON body,
 `{"disposition": "not_started"}`, and never the text. It opens no session and checks no
-toolsets: no text reaches it, and the model has no tool that calls it. So an alarm still
-goes out while a widened profile has every text answered `503`.
+toolsets: no text reaches it, and the model has no tool that calls it. So while a widened
+profile has every text answered `503`, the alarm about it still goes out, until the
+platform next connects. A reconnect or a restart reruns the start checks, which refuse the
+widened profile; from then on `/imessage/send` answers `503` too, or nothing listens, and
+n8n's run record and its log are what report it.
 
 One more guard, for anyone who runs more than one Hermes profile: the adapter starts only in
 a profile named `imessage`, judged by the home Hermes gives it. The author's default profile
@@ -212,7 +215,7 @@ python3 -m unittest discover -s tests -p 'test_*.py'
 ```
 
 The adapter's suite needs Hermes's own environment (`gateway`, `aiohttp`) and skips without
-it. The full run, 115 tests, is:
+it. The full run, 117 tests, is:
 
 ```sh
 IMESSAGE_SHORTCUTS_TESTS_REQUIRE_HERMES=1 hermes --run-module unittest discover -s tests -p 'test_*.py'
