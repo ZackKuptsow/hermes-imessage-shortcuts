@@ -63,9 +63,10 @@ secret (n8n's alarms) can reach your phone through the gateway's existing Automa
 Its body is a JSON object of two strings, `to` and `text`. It passes the same three checks
 first (`403` off the loopback address, `503` while the platform is not serving, `401`
 without the secret), then `400` for a malformed body. The text leaves the way a reply does,
-through gate 3: a recipient off the allow list is a `204` with `X-Imessage-Dropped: sender`
-and an empty text one with `empty`, and imsg never runs for either. `202` means imsg
-reported `sent`. `502` means it did not, with imsg's word for why in a JSON body,
+through gate 3: a recipient off the allow list is a `204` with `X-Imessage-Dropped: sender`,
+and an empty text is a `400`, since the caller composed it and a `204` would read as
+success; imsg never runs for either. `202` means imsg reported `sent`. `502` means it did
+not, with imsg's word for why in a JSON body,
 `{"disposition": "not_started"}`, and never the text. It opens no session and checks no
 toolsets: no text reaches it, and the model has no tool that calls it. So while a widened
 profile has every text answered `503`, the alarm about it still goes out, until the
@@ -165,11 +166,17 @@ Save the list with
    card picked from Contacts, Message Contains left empty, Run Immediately, Allow Running When
    Locked. On macOS 26, with a typed handle as the sender the trigger would not save with
    Message Contains empty, and any text there (a single space) drops every one-word text.
-   - Format Date: its Date set to Current Date, its format ISO 8601, with the time. Left as
-     added, the action is handed the message, writes nothing, and the listener refuses the
-     text (400, "the field 'sent_at' is not a moment" in the gateway log), as it refuses a
-     date without its time or offset: an empty `sent_at` gives every repeat of a text one key,
-     and Hermes answers the repeat with an error.
+   - Format Date: its Date set to Current Date, Date Format ISO 8601, Include ISO 8601 Time
+     on. The action's own settings do the formatting, and the Current Date token inside it
+     must carry none. Clicking the token opens a popover whose Date Format and Time Format
+     read Medium and Short when it has no format of its own: leave them. Set ISO 8601 there
+     and Format Date is handed text instead of a date, keeps only the day (`2026-11-02`,
+     without the time or offset), and the listener refuses every text. To clear a format
+     already set, delete the token and pick Current Date again. Left as added, the action is
+     handed the message instead and writes nothing, which is refused the same way. Either
+     shows as a 400 with "the field 'sent_at' is not a moment" in the gateway log, the
+     refusal for any `sent_at` without its time and offset: an empty one would give every
+     repeat of a text one key, and Hermes answers the repeat with an error.
    - Get Contents of URL: `POST` `http://127.0.0.1:8645/imessage`, header `X-Hermes-Secret`,
      a JSON body of `sender` (the sender's handle, not the contact's name), `sent_at` (Format
      Date's Formatted Date) and `text`.
