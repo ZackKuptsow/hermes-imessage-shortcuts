@@ -53,6 +53,26 @@ The listener binds `127.0.0.1` or `::1` and refuses any other address, compares 
 secret first and in constant time (at least 32 characters), and reads a body only once the
 secret matches. Nothing logs a text, a handle or a secret.
 
+Every `204` says why it dropped a request, in an `X-Imessage-Dropped` header holding exactly
+one of `sender`, `empty` or `duplicate`, and no other answer carries it. On `POST /imessage`
+those are a sender off the allow list, an empty text, and a repeat of a text already taken.
+A caller such as an n8n relay can then alarm on a sender drop and let a safe retry pass.
+
+`POST /imessage/send` sends one text without the model, so a loopback caller holding the
+secret (n8n's alarms) can reach your phone through the gateway's existing Automation grant.
+Its body is a JSON object of two strings, `to` and `text`. It passes the same three checks
+first (`403` off the loopback address, `503` while the platform is not serving, `401`
+without the secret), then `400` for a malformed body. The text leaves the way a reply does,
+through gate 3: a recipient off the allow list is a `204` with `X-Imessage-Dropped: sender`
+and an empty text one with `empty`, and imsg never runs for either. `202` means imsg
+reported `sent`. `502` means it did not, with imsg's word for why in a JSON body,
+`{"disposition": "not_started"}`, and never the text. It opens no session and checks no
+toolsets: no text reaches it, and the model has no tool that calls it. So while a widened
+profile has every text answered `503`, the alarm about it still goes out, until the
+platform next connects. A reconnect or a restart reruns the start checks, which refuse the
+widened profile; from then on `/imessage/send` answers `503` too, or nothing listens, and
+n8n's run record and its log are what report it.
+
 One more guard, for anyone who runs more than one Hermes profile: the adapter starts only in
 a profile named `imessage`, judged by the home Hermes gives it. The author's default profile
 runs a cloud model and his texting profile runs a local one, and this is what keeps
@@ -181,7 +201,7 @@ contract is `POST /` with a JSON body of `sender`, `sent_at` and `text` and the 
 
 | Path | What it is |
 |---|---|
-| `imessage-shortcuts/` | the plugin: `adapter.py` (the loopback listener and the replies), `handles.py` (canonical handles and the allow list), `allowed_toolsets.py` (the closed list of toolsets a text may reach), `inbound.py` (the request's shape), `imsg.py` (finding and calling imsg), `household.py` and `tools.py` (the optional forward), `registration.py`, `plugin.yaml` |
+| `imessage-shortcuts/` | the plugin: `adapter.py` (the loopback listener, `POST /imessage` for texts and `POST /imessage/send` for a text out without the model, each `204` saying why in `X-Imessage-Dropped`, and the replies), `handles.py` (canonical handles and the allow list), `allowed_toolsets.py` (the closed list of toolsets a text may reach), `inbound.py` (the request's shape), `imsg.py` (finding and calling imsg), `household.py` and `tools.py` (the optional forward), `registration.py`, `plugin.yaml` |
 | `bin/imessage-reply` | sends one iMessage, only to a handle on the allow list; a check that imsg works |
 | `bin/household-forward` | forwards one command from a terminal; prints only whether the answer was delivered |
 | `tests/` | the plugin's and the scripts' tests |
@@ -195,7 +215,7 @@ python3 -m unittest discover -s tests -p 'test_*.py'
 ```
 
 The adapter's suite needs Hermes's own environment (`gateway`, `aiohttp`) and skips without
-it. The full run, 96 tests, is:
+it. The full run, 117 tests, is:
 
 ```sh
 IMESSAGE_SHORTCUTS_TESTS_REQUIRE_HERMES=1 hermes --run-module unittest discover -s tests -p 'test_*.py'

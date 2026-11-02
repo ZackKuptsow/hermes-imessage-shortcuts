@@ -31,6 +31,14 @@ class SendRefusedError(Exception):
     """A send this module will not attempt: a handle off the allow list, or no text."""
 
 
+class RecipientRefusedError(SendRefusedError):
+    """The recipient is not a handle, or not on the allow list."""
+
+
+class EmptyTextRefusedError(SendRefusedError):
+    """There is no text to send."""
+
+
 class ImsgMissingError(Exception):
     """imsg is not installed where it is looked for."""
 
@@ -98,17 +106,17 @@ def send_message(
     """Send *text* to *handle* when the handle is on *allowed_handles*.
 
     Raises:
-        SendRefusedError: the handle is not a handle or not on the allow list, or the text
-            is empty. Nothing is sent.
+        RecipientRefusedError: the handle is not a handle or not on the allow list.
+        EmptyTextRefusedError: the text is empty. Nothing is sent in either case.
     """
     try:
         recipient = handles.canonical_handle(handle)
     except handles.InvalidHandleError as error:
-        raise SendRefusedError(f"refusing to send: the recipient is {error}") from error
+        raise RecipientRefusedError(f"refusing to send: the recipient is {error}") from error
     if recipient not in allowed_handles:
-        raise SendRefusedError("refusing to send to a handle that is not on the allow list")
+        raise RecipientRefusedError("refusing to send to a handle that is not on the allow list")
     if not text.strip():
-        raise SendRefusedError("refusing to send an empty message")
+        raise EmptyTextRefusedError("refusing to send an empty message")
     try:
         completed = run(build_send_arguments(imsg_path, recipient, text), capture_output=True, text=True,
                         timeout=SEND_TIMEOUT_SECONDS, check=False)
