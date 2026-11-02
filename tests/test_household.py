@@ -123,7 +123,8 @@ class ForwardTest(unittest.TestCase):
 
         outcome = household.forward_household_command(COMMAND, self.settings, secret_reader=lambda: HOUSEHOLD_SECRET,
                                                       opener=refuse, run=self.imsg_run, clock=lambda: SENT_AT)
-        self.assertEqual((outcome.delivered, outcome.status, self.imsg_run.calls), (False, None, []))
+        self.assertEqual((outcome.delivered, outcome.nothing_to_send, outcome.status, self.imsg_run.calls),
+                         (False, False, None, []))
         self.assertNotIn("example.invalid", outcome.summary)
 
     def test_an_empty_command_posts_nothing(self):

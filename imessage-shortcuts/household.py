@@ -45,8 +45,9 @@ class ForwardOutcome:
     """The result of one forward, in words safe for a transcript: never the answer itself.
 
     `nothing_to_send` is True when the function took the message and had no answer, a 204
-    or a blank 200: not delivered, yet nothing went wrong. Callers read it rather than the
-    status, which cannot tell a blank 200 from an answer whose send failed.
+    or a blank 200: not delivered, yet nothing went wrong. A caller that must tell the two
+    apart, as `bin/household-forward`'s exit code does, reads it rather than the status, which
+    cannot tell a blank 200 from an answer whose send failed.
     """
 
     delivered: bool

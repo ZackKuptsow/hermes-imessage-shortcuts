@@ -19,6 +19,7 @@ from collections.abc import Callable
 from http import HTTPStatus
 from pathlib import Path
 from types import ModuleType
+from typing import NoReturn
 from unittest import mock
 
 from support import PARTNER_PHONE, ZACK_EMAIL, ZACK_PHONE, RecordingRun
@@ -28,6 +29,7 @@ FUNCTION_URL = "https://function.example.invalid/"
 HOUSEHOLD_ANSWER = "Added oat milk. The list: oat milk, her prescription refill."
 HOUSEHOLD_SECRET = "h" * 64
 IMSG_NOT_STARTED = '{"status":"error","disposition":"not_started"}'
+SENT_AT = "2026-10-27T13:14:05-04:00"
 
 
 class ScriptTest(unittest.TestCase):
@@ -130,6 +132,11 @@ def function_answering(status: int, body: str = "") -> Callable[..., StubRespons
     return opener
 
 
+def function_unreachable(request, timeout) -> NoReturn:
+    """An opener standing in for urlopen when the function cannot be reached at all."""
+    raise urllib.error.URLError("connection refused")
+
+
 class HouseholdForwardExitCodeTest(ScriptTest):
     """The exit code for each answer the function can give.
 
@@ -145,13 +152,16 @@ class HouseholdForwardExitCodeTest(ScriptTest):
         self.script = load_script("household-forward")
 
     def run_main(self, opener: Callable[..., StubResponse], imsg_run: RecordingRun) -> tuple[int, str]:
-        """household-forward's main() for one command, against a function answering through *opener*."""
+        """household-forward's main() for one command, against a function answering through *opener*.
+
+        Returns the exit code and everything printed, standard output and standard error together.
+        """
         household = self.script.plugin_module("household")
         shipped_forward = household.forward_household_command
 
         def forward_with_stubbed_edges(text, settings):
             return shipped_forward(text, settings, secret_reader=lambda: HOUSEHOLD_SECRET, opener=opener,
-                                   run=imsg_run, clock=lambda: "2026-10-27T13:14:05-04:00")
+                                   run=imsg_run, clock=lambda: SENT_AT)
 
         printed = io.StringIO()
         with contextlib.ExitStack() as stack:
@@ -159,6 +169,7 @@ class HouseholdForwardExitCodeTest(ScriptTest):
             stack.enter_context(mock.patch.dict(os.environ, self.environment))
             stack.enter_context(mock.patch.object(sys, "argv", ["household-forward", "add oat milk"]))
             stack.enter_context(contextlib.redirect_stdout(printed))
+            stack.enter_context(contextlib.redirect_stderr(printed))
             exit_code = self.script.main()
         return exit_code, printed.getvalue()
 
@@ -170,6 +181,7 @@ class HouseholdForwardExitCodeTest(ScriptTest):
             ("a refusal", function_answering(403), RecordingRun(), 1),
             ("an answer whose send failed", function_answering(200, HOUSEHOLD_ANSWER),
              RecordingRun(stdout=IMSG_NOT_STARTED, returncode=1), 1),
+            ("no answer at all: the function is unreachable", function_unreachable, RecordingRun(), 1),
         )
         for case, opener, imsg_run, expected_exit_code in cases:
             with self.subTest(case=case):
