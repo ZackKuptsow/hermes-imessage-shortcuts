@@ -84,7 +84,7 @@ class DropReason(enum.Enum):
     """Why a 204 dropped a request, as its X-Imessage-Dropped header says: a closed list."""
 
     DUPLICATE = "duplicate"
-    EMPTY = "empty"
+    EMPTY = "empty"  # the ingress only: the send endpoint answers an empty text 400
     SENDER = "sender"  # on the send endpoint, the recipient
 
 
@@ -348,13 +348,14 @@ class ImessageShortcutsAdapter(BasePlatformAdapter):
     async def _handle_send(self, request: web.Request) -> web.Response:
         """Send one text for a loopback caller with the secret, to a handle on the allow list.
 
-        403, 503 and 401 as the ingress answers them, and 400 when malformed. A 204 says why
-        in X-Imessage-Dropped: `sender` for a recipient off the allow list, `empty` for no
-        text. 202 when imsg reported `sent`; 502 when it did not, with imsg's disposition in
-        a JSON body. No session, no duplicate check and no toolset check: this is a send,
-        not a text to Hermes, and the alarm about a widened profile, whose texts the
-        ingress answers 503, must still go out. That holds until the next connect, whose
-        start checks refuse the profile and leave both routes answering 503.
+        403, 503 and 401 as the ingress answers them, and 400 when malformed or when there is
+        no text: the caller composed it, so an empty one is the caller's bug, which a 204
+        would pass off as success. A 204 with X-Imessage-Dropped `sender` for a recipient off
+        the allow list. 202 when imsg reported `sent`; 502 when it did not, with imsg's
+        disposition in a JSON body. No session, no duplicate check and no toolset check:
+        this is a send, not a text to Hermes, and the alarm about a widened profile, whose
+        texts the ingress answers 503, must still go out. That holds until the next
+        connect, whose start checks refuse the profile and leave both routes answering 503.
         """
         settings = self._admit(request)
         if isinstance(settings, web.Response):
@@ -368,7 +369,8 @@ class ImessageShortcutsAdapter(BasePlatformAdapter):
         if isinstance(sent.refusal, imsg.RecipientRefusedError):
             return dropped_response(DropReason.SENDER)
         if isinstance(sent.refusal, imsg.EmptyTextRefusedError):
-            return dropped_response(DropReason.EMPTY)
+            logger.warning(f"{LOG_PREFIX} refused a send request: there is no text to send")
+            return web.Response(status=400)
         if not sent.result.success:
             return web.json_response({"disposition": sent.disposition or imsg.DISPOSITION_UNKNOWN}, status=502)
         logger.info(f"{LOG_PREFIX} sent a text for a loopback caller")

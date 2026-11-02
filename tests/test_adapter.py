@@ -484,11 +484,12 @@ class AdapterTest(unittest.IsolatedAsyncioTestCase):
                 self.assertEqual(answer[:2], (204, "sender"))
         self.assertEqual(self.imsg_calls(), [])
 
-    async def test_a_send_with_no_text_is_dropped_as_empty_and_imsg_never_runs(self):
+    async def test_a_send_with_no_text_is_refused_as_a_bad_request_and_imsg_never_runs(self):
+        # The caller composes the text, so an empty one is its bug: a 204 would read as success.
         await self.start_adapter()
         for text in ("", "  \n"):
             with self.subTest(text=text):
-                self.assertEqual((await self.send_request(self.alarm(text=text)))[:2], (204, "empty"))
+                self.assertEqual((await self.send_request(self.alarm(text=text)))[:2], (400, None))
         self.assertEqual(self.imsg_calls(), [])
 
     async def test_a_send_without_the_secret_is_refused(self):
@@ -541,7 +542,7 @@ class AdapterTest(unittest.IsolatedAsyncioTestCase):
                         (await self.send_request(self.alarm(), secret=SECRET[:-1] + "x"))[0]]
             self.fake_imsg_answers(IMSG_NOT_STARTED, exit_code=1)
             statuses.append((await self.send_request(self.alarm()))[0])
-        self.assertEqual(statuses, [202, 204, 204, 400, 401, 502])  # every path that logs was taken
+        self.assertEqual(statuses, [202, 204, 400, 400, 401, 502])  # every path that logs was taken
         for record in logged.records:
             for kept_out in (ALARM, "5550100199", "010-0199", "5550100142", SECRET, SECRET[:-1]):
                 with self.subTest(message=record.getMessage()):

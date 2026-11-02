@@ -63,8 +63,9 @@ secret (n8n's alarms) can reach your phone through the gateway's existing Automa
 Its body is a JSON object of two strings, `to` and `text`. It passes the same three checks
 first (`403` off the loopback address, `503` while the platform is not serving, `401`
 without the secret), then `400` for a malformed body. The text leaves the way a reply does,
-through gate 3: a recipient off the allow list is a `204` with `X-Imessage-Dropped: sender`
-and an empty text one with `empty`, and imsg never runs for either. `202` means imsg
+through gate 3: a recipient off the allow list is a `204` with `X-Imessage-Dropped: sender`,
+and an empty text is a `400`, since the caller composed it and a `204` would read as
+success; imsg never runs for either. `202` means imsg
 reported `sent`. `502` means it did not, with imsg's word for why in a JSON body,
 `{"disposition": "not_started"}`, and never the text. It opens no session and checks no
 toolsets: no text reaches it, and the model has no tool that calls it. So while a widened
