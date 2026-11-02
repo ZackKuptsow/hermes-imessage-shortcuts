@@ -21,12 +21,22 @@ else (`check_profile_toolsets`); it pins those two as every text's toolsets
 (`toolsets_for_source`), whatever the saved list says by then; and a text's slash command
 runs only when it is one of TEXT_COMMANDS, any other reaching the model as words.
 
+`POST /imessage/send` sends one text to a handle on the allow list without the model, so
+n8n's alarms reach Zack's phone through the gateway's existing Automation grant. It is
+reached by a loopback caller holding the secret, never by a text, and the model has no tool
+that calls it: it gives a text no reach beyond the two toolsets (smart-home ADR 0035). It
+leaves the way a reply does (`_send_text`), so the third wall holds for it too.
+
+A 204 says why it dropped a request in X-Imessage-Dropped, one of DropReason's words, so
+n8n can alarm on a sender drop and not on a duplicate or an empty text.
+
 Nothing here logs a text, a handle or the secret.
 """
 
 from __future__ import annotations
 
 import asyncio
+import enum
 import logging
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -45,6 +55,7 @@ from . import allowed_toolsets, handles, imsg, inbound
 
 DEFAULT_HOST = "127.0.0.1"
 DEFAULT_PORT = 8645
+DROPPED_HEADER = "X-Imessage-Dropped"
 ENV_ALLOW_ALL = "IMESSAGE_SHORTCUTS_ALLOW_ALL_USERS"
 ENV_ALLOWED_USERS = "IMESSAGE_SHORTCUTS_ALLOWED_USERS"
 ENV_HOST = "IMESSAGE_SHORTCUTS_HOST"
@@ -56,6 +67,7 @@ LOG_PREFIX = "[imessage_shortcuts]"
 LOOPBACK_ADDRESSES = frozenset({"127.0.0.1", "::1"})
 MAX_MESSAGE_LENGTH = 4000
 PLATFORM_NAME = "imessage_shortcuts"
+SEND_PATH = "/imessage/send"
 # The gateway commands a text may run (smart-home ADR 0035): a fresh session, stopping a
 # reply, and the two replies to /new's confirmation. Any other reaches the model as words.
 TEXT_COMMANDS = frozenset({"approve", "cancel", "new", "reset", "stop"})
@@ -66,6 +78,32 @@ logger = logging.getLogger(__name__)
 
 class StartupRefusedError(Exception):
     """A configuration this adapter will not serve; the message says which part."""
+
+
+class DropReason(enum.Enum):
+    """Why a 204 dropped a request, as its X-Imessage-Dropped header says: a closed list."""
+
+    DUPLICATE = "duplicate"
+    EMPTY = "empty"
+    SENDER = "sender"  # on the send endpoint, the recipient
+
+
+def dropped(reason: DropReason) -> web.Response:
+    """The 204 for a dropped request, saying why. No other answer carries the header."""
+    return web.Response(status=204, headers={DROPPED_HEADER: reason.value})
+
+
+@dataclass(frozen=True)
+class TextSent:
+    """How one text fared on its way out: what `send` returns, and why it failed when it did.
+
+    The reasons ride beside the result, not in its `raw_response`: once that is a dict the
+    gateway classifies a failed send from it alone (`gateway.relay.egress.declined_send`).
+    """
+
+    result: SendResult
+    disposition: str | None = None  # imsg's word for the chunk it did not send
+    refusal: imsg.SendRefusedError | None = None  # imsg.send_message's, when imsg never ran
 
 
 @dataclass(frozen=True)
@@ -216,6 +254,7 @@ class ImessageShortcutsAdapter(BasePlatformAdapter):
             return False
         application = web.Application(client_max_size=inbound.MAXIMUM_BODY_BYTES)
         application.router.add_post(INGRESS_PATH, self._handle_post)
+        application.router.add_post(SEND_PATH, self._handle_send)
         self._runner = web.AppRunner(application, access_log=None)
         await self._runner.setup()
         self._settings = settings
@@ -231,7 +270,7 @@ class ImessageShortcutsAdapter(BasePlatformAdapter):
             return False
         self._running = True
         self._mark_connected()
-        logger.info(f"{LOG_PREFIX} listening on {settings.host}:{settings.port}{INGRESS_PATH} "
+        logger.info(f"{LOG_PREFIX} listening on {settings.host}:{settings.port}{INGRESS_PATH} and {SEND_PATH} "
                     f"for {len(settings.allowed)} handle(s)")
         return True
 
@@ -248,11 +287,11 @@ class ImessageShortcutsAdapter(BasePlatformAdapter):
         """Every text's toolsets: the two, whatever the saved list says now (smart-home ADR 0035)."""
         return sorted(allowed_toolsets.ALLOWED_TOOLSETS)
 
-    async def _handle_post(self, request: web.Request) -> web.Response:
-        """Take one posted text: 401 without the secret, 400 when malformed, 204 when dropped, 202 when taken.
+    def _admit(self, request: web.Request) -> StartupSettings | web.Response:
+        """The settings to serve *request* with, or the refusal it gets before its body is read.
 
-        503 while the platform is not serving, or once the profile would let a text reach a
-        toolset beyond the two.
+        Both routes check first, in this order: 403 from a peer off the loopback address, 503
+        while the platform is not serving, 401 without the right secret.
         """
         if request.remote not in LOOPBACK_ADDRESSES:
             return web.Response(status=403)
@@ -262,6 +301,18 @@ class ImessageShortcutsAdapter(BasePlatformAdapter):
         if not inbound.secret_matches(settings.secret, request.headers.get(inbound.SECRET_HEADER)):
             logger.warning(f"{LOG_PREFIX} refused a request without the right secret")
             return web.Response(status=401)
+        return settings
+
+    async def _handle_post(self, request: web.Request) -> web.Response:
+        """Take one posted text: 401 without the secret, 400 when malformed, 204 when dropped, 202 when taken.
+
+        A 204's X-Imessage-Dropped says why: `sender`, `empty` or `duplicate`. 403 from a peer
+        off the loopback address; 503 while the platform is not serving, or once the profile
+        would let a text reach a toolset beyond the two.
+        """
+        settings = self._admit(request)
+        if isinstance(settings, web.Response):
+            return settings
         try:
             posted = inbound.parse_posted_message(await request.read())
         except inbound.MalformedMessageError as error:
@@ -273,14 +324,16 @@ class ImessageShortcutsAdapter(BasePlatformAdapter):
             sender = ""
         if sender not in settings.allowed:
             logger.warning(f"{LOG_PREFIX} dropped a text from a sender not on the allow list")
-            return web.Response(status=204)
+            return dropped(DropReason.SENDER)
         try:
             await asyncio.to_thread(check_profile_toolsets)
         except allowed_toolsets.ToolsetsRefusedError as error:
             logger.error(f"{LOG_PREFIX} refused a text: {error}")
             return web.Response(status=503)
-        if not posted.text.strip() or self._deduplicator.is_duplicate(posted.key()):
-            return web.Response(status=204)
+        if not posted.text.strip():
+            return dropped(DropReason.EMPTY)
+        if self._deduplicator.is_duplicate(posted.key()):
+            return dropped(DropReason.DUPLICATE)
         message_id = posted.key()[:16]
         source = self.build_source(chat_id=sender, chat_name="iMessage", chat_type="dm", user_id=sender,
                                    user_name="Zack", message_id=message_id)
@@ -292,27 +345,70 @@ class ImessageShortcutsAdapter(BasePlatformAdapter):
         task.add_done_callback(self._background_tasks.discard)
         return web.Response(status=202)
 
+    async def _handle_send(self, request: web.Request) -> web.Response:
+        """Send one text for a loopback caller with the secret, to a handle on the allow list.
+
+        403, 503 and 401 as the ingress answers them, and 400 when malformed. A 204 says why
+        in X-Imessage-Dropped: `sender` for a recipient off the allow list, `empty` for no
+        text. 202 when imsg reported `sent`; 502 when it did not, with imsg's disposition in
+        a JSON body. No session, no duplicate check and no toolset check: this is a send,
+        not a text to Hermes, and the alarm about a widened profile, whose texts the
+        ingress answers 503, must still go out.
+        """
+        settings = self._admit(request)
+        if isinstance(settings, web.Response):
+            return settings
+        try:
+            send_request = inbound.parse_send_request(await request.read())
+        except inbound.MalformedMessageError as error:
+            logger.warning(f"{LOG_PREFIX} refused a send request: {error}")
+            return web.Response(status=400)
+        sent = await self._send_text(settings, send_request.to, send_request.text)
+        if isinstance(sent.refusal, imsg.RecipientRefusedError):
+            return dropped(DropReason.SENDER)
+        if isinstance(sent.refusal, imsg.EmptyTextRefusedError):
+            return dropped(DropReason.EMPTY)
+        if not sent.result.success:
+            return web.json_response({"disposition": sent.disposition or imsg.DISPOSITION_UNKNOWN}, status=502)
+        logger.info(f"{LOG_PREFIX} sent a text for a loopback caller")
+        return web.Response(status=202)
+
     async def send(self, chat_id: str, content: str, reply_to: str | None = None,
                    metadata: dict | None = None) -> SendResult:
         """Send *content* to *chat_id* through imsg, refusing any handle off the allow list."""
         settings = self._settings
         if settings is None:
             return SendResult(success=False, error="the platform is not connected")
+        return (await self._send_text(settings, chat_id, content)).result
+
+    async def _send_text(self, settings: StartupSettings, handle: str, content: str) -> TextSent:
+        """Send *content* to *handle* as plain text, chunked, each chunk through imsg off the event loop.
+
+        The one way a text leaves, for a reply and the send endpoint alike. imsg.send_message
+        refuses a handle off the allow list and an empty text; the first chunk that fails
+        stops the rest.
+        """
+        disposition: str | None = None
+        refusal: imsg.SendRefusedError | None = None
 
         async def send_one(chunk: str) -> SendResult:
+            nonlocal disposition, refusal
             try:
-                outcome = await asyncio.to_thread(imsg.send_message, chunk, chat_id, settings.allowed,
+                outcome = await asyncio.to_thread(imsg.send_message, chunk, handle, settings.allowed,
                                                   settings.imsg_path)
             except imsg.SendRefusedError as error:
                 logger.error(f"{LOG_PREFIX} {error}")
+                refusal = error
                 return SendResult(success=False, error=str(error))
             if outcome.delivered:
                 return SendResult(success=True)
             logger.error(f"{LOG_PREFIX} imsg did not send: {outcome.disposition}")
+            disposition = outcome.disposition
             return SendResult(success=False, error=f"imsg did not send: {outcome.disposition}")
 
         chunks = self.truncate_message(self.format_message(content), self.MAX_MESSAGE_LENGTH)
-        return await send_chunks(chunks, send_one)
+        result = await send_chunks(chunks, send_one)
+        return TextSent(result=result, disposition=disposition, refusal=refusal)
 
     async def get_chat_info(self, chat_id: str) -> dict:
         """iMessage chats here are one person's direct thread."""

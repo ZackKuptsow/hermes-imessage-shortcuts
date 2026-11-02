@@ -63,5 +63,26 @@ class ParsePostedMessageTest(unittest.TestCase):
         self.assertNotEqual(first.key(), inbound.parse_posted_message(body(text="another")).key())
 
 
+def send_body(**fields: object) -> bytes:
+    return json.dumps({"text": TEXT, "to": ZACK_PHONE, **fields}).encode()
+
+
+class ParseSendRequestTest(unittest.TestCase):
+    def test_reads_the_two_strings_and_ignores_extra_fields(self):
+        request = inbound.parse_send_request(send_body(extra="ignored"))
+        self.assertEqual((request.to, request.text), (ZACK_PHONE, TEXT))
+
+    def test_refuses_what_is_not_an_object_of_the_two_strings(self):
+        for raw in (send_body(text=5), send_body(to=None), json.dumps(["a"]).encode(), b"{not json", b"\xff\xfe",
+                    json.dumps({"to": ZACK_PHONE}).encode(), json.dumps({"text": TEXT}).encode(), b"x" * 70_000):
+            with self.subTest(raw=raw[:20]), self.assertRaises(inbound.MalformedMessageError) as raised:
+                inbound.parse_send_request(raw)
+            self.assertNotIn(TEXT, str(raised.exception))
+
+    def test_an_empty_text_is_left_for_the_send_to_refuse(self):
+        # imsg.send_message refuses an empty text; the parser adds no check in front of it.
+        self.assertEqual(inbound.parse_send_request(send_body(text="")).text, "")
+
+
 if __name__ == "__main__":
     unittest.main()

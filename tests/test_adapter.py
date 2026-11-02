@@ -29,7 +29,15 @@ from support import (
     plugin_package,
 )
 
+ALARM = "The texting path failed: plugin answered 503 at 17:02"
+# The header and the paths are the contract with n8n, so the tests spell them out.
+DROPPED_HEADER = "X-Imessage-Dropped"
+IMSG_NOT_STARTED = '{"status": "error", "disposition": "not_started"}'
+IMSG_SENT = '{"status": "sent"}'
+INGRESS = "/imessage"
+SEND = "/imessage/send"
 TEXT = "what is on my calendar"
+WIDENED_TOOLSETS = ["imessage_shortcuts", "memory", "terminal"]
 
 
 def free_port() -> int:
@@ -71,18 +79,14 @@ class AdapterTest(unittest.IsolatedAsyncioTestCase):
         self.write_allow_list(self.home)
         self.write_settings(self.home, ["imessage_shortcuts", "memory"])
         self.record = self.root / "imsg-calls.jsonl"
-        fake_imsg = self.root / "imsg"
-        fake_imsg.write_text(
-            f"#!{sys.executable}\nimport json, os, sys\n"
-            "open(os.environ['FAKE_IMSG_RECORD'], 'a').write(json.dumps(sys.argv[1:]) + '\\n')\n"
-            "print(json.dumps({'status': 'sent'}))\n")
-        fake_imsg.chmod(fake_imsg.stat().st_mode | stat.S_IXUSR)
+        self.fake_imsg = self.root / "imsg"
+        self.fake_imsg_answers(IMSG_SENT)
         self.port = free_port()
         self.environment = mock.patch.dict(os.environ, {
             "FAKE_IMSG_RECORD": str(self.record),
             "HERMES_HOME": str(self.home),
             "IMESSAGE_SHORTCUTS_ALLOWED_USERS": f"(555) 010-0199,{ZACK_EMAIL.upper()}",
-            "IMESSAGE_SHORTCUTS_IMSG": str(fake_imsg),
+            "IMESSAGE_SHORTCUTS_IMSG": str(self.fake_imsg),
             "IMESSAGE_SHORTCUTS_PORT": str(self.port),
             "IMESSAGE_SHORTCUTS_SECRET": SECRET,
         })
@@ -101,6 +105,14 @@ class AdapterTest(unittest.IsolatedAsyncioTestCase):
         home.mkdir(parents=True, exist_ok=True)
         (home / "config.yaml").write_text(json.dumps({"platform_toolsets": {"imessage_shortcuts": toolsets}}))
 
+    def fake_imsg_answers(self, answer: str, exit_code: int = 0) -> None:
+        """The stand-in imsg: records each call, then prints *answer* and exits *exit_code*."""
+        self.fake_imsg.write_text(
+            f"#!{sys.executable}\nimport json, os, sys\n"
+            "open(os.environ['FAKE_IMSG_RECORD'], 'a').write(json.dumps(sys.argv[1:]) + '\\n')\n"
+            f"print({answer!r})\nsys.exit({exit_code})\n")
+        self.fake_imsg.chmod(self.fake_imsg.stat().st_mode | stat.S_IXUSR)
+
     def imsg_calls(self) -> list[list[str]]:
         if not self.record.exists():
             return []
@@ -115,7 +127,9 @@ class AdapterTest(unittest.IsolatedAsyncioTestCase):
         self.addAsyncCleanup(adapter.disconnect)
         return adapter
 
-    async def post(self, payload: object, secret: str | None = SECRET, raw: bytes | None = None) -> int:
+    async def request(self, path: str, payload: object, secret: str | None = SECRET,
+                      raw: bytes | None = None) -> tuple[int, str | None, bytes]:
+        """POST to *path* on the listener: the status, the drop-reason header (None when absent), the body."""
         import aiohttp
 
         headers = {"Content-Type": "application/json"}
@@ -123,8 +137,22 @@ class AdapterTest(unittest.IsolatedAsyncioTestCase):
             headers["X-Hermes-Secret"] = secret
         data = raw if raw is not None else json.dumps(payload).encode()
         async with aiohttp.ClientSession() as session, session.post(
-                f"http://127.0.0.1:{self.port}/imessage", data=data, headers=headers) as response:
-            return response.status
+                f"http://127.0.0.1:{self.port}{path}", data=data, headers=headers) as response:
+            return response.status, response.headers.get(DROPPED_HEADER), await response.read()
+
+    async def post(self, payload: object, secret: str | None = SECRET, raw: bytes | None = None) -> int:
+        """POST a text to the ingress; its status."""
+        status, _, _ = await self.request(INGRESS, payload, secret, raw)
+        return status
+
+    async def send_request(self, payload: object, secret: str | None = SECRET,
+                           raw: bytes | None = None) -> tuple[int, str | None, bytes]:
+        """POST to the send endpoint: the status, the drop-reason header, the body."""
+        return await self.request(SEND, payload, secret, raw)
+
+    @staticmethod
+    def alarm(to: str = ZACK_PHONE, text: str = ALARM) -> dict:
+        return {"text": text, "to": to}
 
     @staticmethod
     def message(sender: str = "+1 (555) 010-0199", text: str = TEXT) -> dict:
@@ -275,13 +303,13 @@ class AdapterTest(unittest.IsolatedAsyncioTestCase):
 
     async def test_every_text_gets_the_two_toolsets_whatever_the_saved_list_says_now(self):
         adapter = await self.start_adapter()
-        self.write_settings(self.home, ["imessage_shortcuts", "memory", "terminal"])
+        self.write_settings(self.home, WIDENED_TOOLSETS)
         source = adapter.build_source(chat_id=ZACK_PHONE, chat_type="dm", user_id=ZACK_PHONE)
         self.assertEqual(adapter.toolsets_for_source(source), ["imessage_shortcuts", "memory"])
 
     async def test_a_text_is_refused_once_the_profile_widens_after_start(self):
         adapter = await self.start_adapter()
-        self.write_settings(self.home, ["imessage_shortcuts", "memory", "terminal"])
+        self.write_settings(self.home, WIDENED_TOOLSETS)
         self.assertEqual(await self.post(self.message()), 503)
         adapter.handle_message.assert_not_awaited()
 
@@ -375,6 +403,28 @@ class AdapterTest(unittest.IsolatedAsyncioTestCase):
         await asyncio.sleep(0.05)
         self.assertEqual(adapter.handle_message.await_count, 1)
 
+    async def test_each_drop_says_why_so_n8n_can_alarm_on_a_sender_drop_alone(self):
+        await self.start_adapter()
+        self.assertEqual((await self.request(INGRESS, self.message()))[:2], (202, None))
+        cases = (
+            ("a sender off the allow list", self.message(sender=PARTNER_PHONE), "sender"),
+            ("a sender that is no handle", self.message(sender="Partner Name"), "sender"),
+            ("an empty text", self.message(text="  "), "empty"),
+            ("a repeat of the first text", self.message(), "duplicate"),
+        )
+        for case, payload, reason in cases:
+            with self.subTest(case):
+                self.assertEqual((await self.request(INGRESS, payload))[:2], (204, reason))
+
+    async def test_no_other_answer_from_the_ingress_carries_the_drop_header(self):
+        await self.start_adapter()
+        answers = [await self.request(INGRESS, self.message()),
+                   await self.request(INGRESS, self.message(), secret=None),
+                   await self.request(INGRESS, None, raw=b"{not json")]
+        self.write_settings(self.home, WIDENED_TOOLSETS)
+        answers.append(await self.request(INGRESS, self.message(text="another")))
+        self.assertEqual([answer[:2] for answer in answers], [(202, None), (401, None), (400, None), (503, None)])
+
     # --- what goes out -------------------------------------------------------------------
 
     async def test_a_reply_to_zack_goes_through_imsg_as_plain_text(self):
@@ -400,7 +450,7 @@ class AdapterTest(unittest.IsolatedAsyncioTestCase):
 
     async def test_after_a_refused_reconnect_nothing_is_sent(self):
         adapter = await self.start_adapter()
-        self.write_settings(self.home, ["imessage_shortcuts", "memory", "terminal"])
+        self.write_settings(self.home, WIDENED_TOOLSETS)
         self.assertFalse(await adapter.connect(is_reconnect=True))
         self.assertFalse((await adapter.send(ZACK_PHONE, "still here")).success)
         self.assertEqual(self.imsg_calls(), [])
@@ -410,6 +460,91 @@ class AdapterTest(unittest.IsolatedAsyncioTestCase):
         await adapter.disconnect()
         self.assertFalse((await adapter.send(ZACK_PHONE, "still here")).success)
         self.assertEqual(self.imsg_calls(), [])
+
+    # --- the send endpoint: a text to an allowed handle, never through the model -----------
+
+    async def test_a_send_to_an_allowed_handle_goes_out_through_imsg_as_plain_text(self):
+        adapter = await self.start_adapter()
+        answer = await self.send_request(self.alarm(to="+1 (555) 010-0199", text=f"**Alarm.** {ALARM}"))
+        self.assertEqual(answer[:2], (202, None))
+        (call,) = self.imsg_calls()
+        self.assertEqual(call[:3], ["send", f"--to={ZACK_PHONE}", f"--text=Alarm. {ALARM}"])
+        adapter.handle_message.assert_not_awaited()
+
+    async def test_a_long_send_arrives_as_several_texts(self):
+        await self.start_adapter()
+        self.assertEqual((await self.send_request(self.alarm(text="word " * 1500)))[:2], (202, None))
+        self.assertGreater(len(self.imsg_calls()), 1)
+
+    async def test_a_send_to_anyone_else_is_dropped_as_sender_and_imsg_never_runs(self):
+        await self.start_adapter()
+        for handle in (PARTNER_PHONE, "Partner Name", ""):
+            with self.subTest(handle=handle):
+                answer = await self.send_request(self.alarm(to=handle, text="your pairing code is 123456"))
+                self.assertEqual(answer[:2], (204, "sender"))
+        self.assertEqual(self.imsg_calls(), [])
+
+    async def test_a_send_with_no_text_is_dropped_as_empty_and_imsg_never_runs(self):
+        await self.start_adapter()
+        for text in ("", "  \n"):
+            with self.subTest(text=text):
+                self.assertEqual((await self.send_request(self.alarm(text=text)))[:2], (204, "empty"))
+        self.assertEqual(self.imsg_calls(), [])
+
+    async def test_a_send_without_the_secret_is_refused(self):
+        await self.start_adapter()
+        for secret in (None, SECRET[:-1] + "x"):
+            with self.subTest(secret=secret):
+                self.assertEqual((await self.send_request(self.alarm(), secret=secret))[:2], (401, None))
+        self.assertEqual(self.imsg_calls(), [])
+
+    async def test_a_malformed_send_is_refused(self):
+        await self.start_adapter()
+        for raw in (b"{not json", json.dumps({"to": ZACK_PHONE}).encode(), json.dumps({"text": ALARM}).encode(),
+                    json.dumps({"text": ALARM, "to": 5}).encode(), json.dumps([ZACK_PHONE, ALARM]).encode()):
+            with self.subTest(raw=raw[:24]):
+                self.assertEqual((await self.send_request(None, raw=raw))[:2], (400, None))
+        self.assertEqual(self.imsg_calls(), [])
+
+    async def test_a_send_while_the_platform_is_not_serving_is_refused(self):
+        adapter = await self.start_adapter()
+        self.write_settings(self.home, WIDENED_TOOLSETS)
+        self.assertFalse(await adapter.connect(is_reconnect=True))
+        self.assertEqual((await self.send_request(self.alarm()))[:2], (503, None))
+        self.assertEqual(self.imsg_calls(), [])
+
+    async def test_the_alarm_about_a_widened_profile_still_goes_out(self):
+        # A profile widened after start has every text answered 503, and n8n alarms on that
+        # 503 through this endpoint; a text's toolset check here would silence the alarm.
+        await self.start_adapter()
+        self.write_settings(self.home, WIDENED_TOOLSETS)
+        self.assertEqual(await self.post(self.message()), 503)
+        self.assertEqual((await self.send_request(self.alarm()))[:2], (202, None))
+        self.assertEqual(len(self.imsg_calls()), 1)
+
+    async def test_imsg_not_sending_is_a_502_with_its_disposition_and_never_the_text(self):
+        self.fake_imsg_answers(IMSG_NOT_STARTED, exit_code=1)
+        await self.start_adapter()
+        status, dropped, body = await self.send_request(self.alarm())
+        self.assertEqual((status, dropped, json.loads(body)), (502, None, {"disposition": "not_started"}))
+        self.assertNotIn(b"texting path", body)
+
+    async def test_a_peer_off_the_loopback_address_is_refused_by_both_routes(self):
+        # The listener binds the loopback address alone, so no test can connect from elsewhere:
+        # each route's handler is handed a request whose peer is a LAN address instead.
+        from aiohttp.test_utils import make_mocked_request
+
+        adapter = await self.start_adapter()
+        transport = mock.Mock()
+        transport.get_extra_info.return_value = ("192.168.1.20", 50_000)
+        for path, handler in ((INGRESS, adapter._handle_post), (SEND, adapter._handle_send)):
+            with self.subTest(path=path):
+                request = make_mocked_request("POST", path, headers={"X-Hermes-Secret": SECRET}, transport=transport)
+                self.assertEqual(request.remote, "192.168.1.20")
+                response = await handler(request)
+                self.assertEqual((response.status, response.headers.get(DROPPED_HEADER)), (403, None))
+        self.assertEqual(self.imsg_calls(), [])
+        adapter.handle_message.assert_not_awaited()
 
 if __name__ == "__main__":
     unittest.main()
