@@ -42,6 +42,21 @@ class ParsePostedMessageTest(unittest.TestCase):
                 inbound.parse_posted_message(raw)
             self.assertNotIn(TEXT, str(raised.exception))
 
+    def test_refuses_a_sent_at_that_is_not_a_moment_with_its_time_and_offset(self):
+        # A Format Date left without a date gets the message itself and writes "": every
+        # repeat of a text then shares one key, and Hermes refuses the second as a changed copy.
+        for sent_at in ("", " ", "2026-11-01", "2026-11-01T20:41:03", "November 1, 2026 at 8:41 PM", "not a date"):
+            with self.subTest(sent_at=sent_at):
+                with self.assertRaises(inbound.MalformedMessageError) as raised:
+                    inbound.parse_posted_message(body(sent_at=sent_at))
+                self.assertIn("sent_at", str(raised.exception))
+                self.assertNotIn(TEXT, str(raised.exception))
+
+    def test_accepts_a_moment_with_an_offset_or_z(self):
+        for sent_at in ("2026-10-27T13:14:05-04:00", "2026-11-01T20:41:03-05:00", "2026-11-02T01:41:03Z"):
+            with self.subTest(sent_at=sent_at):
+                self.assertEqual(inbound.parse_posted_message(body(sent_at=sent_at)).sent_at, sent_at)
+
     def test_the_key_tells_messages_apart_and_repeats_for_the_same_one(self):
         first = inbound.parse_posted_message(body())
         self.assertEqual(first.key(), inbound.parse_posted_message(body()).key())

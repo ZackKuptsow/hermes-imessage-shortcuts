@@ -145,9 +145,14 @@ Save the list with
    card picked from Contacts, Message Contains left empty, Run Immediately, Allow Running When
    Locked. On macOS 26, with a typed handle as the sender the trigger would not save with
    Message Contains empty, and any text there (a single space) drops every one-word text.
-   - Format Date: ISO 8601, with the time.
+   - Format Date: its Date set to Current Date, its format ISO 8601, with the time. Left as
+     added, the action is handed the message, writes nothing, and the listener refuses the
+     text (400, "the field 'sent_at' is not a moment" in the gateway log), as it refuses a
+     date without its time or offset: an empty `sent_at` gives every repeat of a text one key,
+     and Hermes answers the repeat with an error.
    - Get Contents of URL: `POST` `http://127.0.0.1:8645/imessage`, header `X-Hermes-Secret`,
-     a JSON body of `sender` (the sender's handle, not the contact's name), `sent_at` and `text`.
+     a JSON body of `sender` (the sender's handle, not the contact's name), `sent_at` (Format
+     Date's Formatted Date) and `text`.
    - No Send Message action: Hermes replies.
 
 Send yourself a text. The first reply raises the Automation prompt for Messages; grant it to
