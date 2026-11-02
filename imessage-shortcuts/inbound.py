@@ -12,6 +12,7 @@ import hashlib
 import hmac
 import json
 from dataclasses import dataclass
+from datetime import datetime
 
 FIELD_NAMES = ("sender", "sent_at", "text")
 MAXIMUM_BODY_BYTES = 65_536
@@ -48,12 +49,28 @@ def secret_matches(expected: str, presented: str | None) -> bool:
     return hmac.compare_digest(expected.encode("utf-8"), presented.encode("utf-8"))
 
 
+def is_a_moment(value: str) -> bool:
+    """True when *value* is an ISO 8601 moment with its time and its offset.
+
+    The household function refuses the same (its `request.py`). A date alone reads as a
+    naive midnight, so the offset is what refuses it. A Format Date action given no date
+    writes "", which would give every repeat of a text one key: Hermes then refuses the
+    repeat as a changed copy of the first (`admission_conflict`) and texts back an error.
+    """
+    try:
+        moment = datetime.fromisoformat(value)
+    except ValueError:
+        return False
+    return moment.tzinfo is not None
+
+
 def parse_posted_message(raw: bytes) -> PostedMessage:
     """Read the three strings out of a request body.
 
     Raises:
-        MalformedMessageError: the body is too long, not UTF-8 JSON, not an object, or a
-            field is missing or not a string. The message never quotes the body.
+        MalformedMessageError: the body is too long, not UTF-8 JSON, not an object, a
+            field is missing or not a string, or `sent_at` is not a moment with its time
+            and offset. The message never quotes the body.
     """
     if len(raw) > MAXIMUM_BODY_BYTES:
         raise MalformedMessageError("the body is too long")
@@ -69,4 +86,6 @@ def parse_posted_message(raw: bytes) -> PostedMessage:
         if not isinstance(value, str):
             raise MalformedMessageError(f"the field {name!r} is missing or not a string")
         values[name] = value
+    if not is_a_moment(values["sent_at"]):
+        raise MalformedMessageError("the field 'sent_at' is not a moment with its time and offset")
     return PostedMessage(**values)

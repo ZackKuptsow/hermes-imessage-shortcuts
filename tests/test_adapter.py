@@ -359,6 +359,14 @@ class AdapterTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(await self.post(None, raw=b'{"sender": "' + b"x" * 70_000 + b'"}'), 413)
         adapter.handle_message.assert_not_awaited()
 
+    async def test_a_text_whose_sent_at_is_blank_or_has_no_time_is_refused(self):
+        adapter = await self.start_adapter()
+        for sent_at in ("", "2026-11-01"):
+            with self.subTest(sent_at=sent_at):
+                self.assertEqual(await self.post({**self.message(), "sent_at": sent_at}), 400)
+        await asyncio.sleep(0.05)
+        adapter.handle_message.assert_not_awaited()
+
     async def test_a_repeated_text_and_an_empty_one_are_dropped(self):
         adapter = await self.start_adapter()
         self.assertEqual(await self.post(self.message()), 202)
