@@ -42,11 +42,17 @@ class ForwardError(Exception):
 
 @dataclass(frozen=True)
 class ForwardOutcome:
-    """The result of one forward, in words safe for a transcript: never the answer itself."""
+    """The result of one forward, in words safe for a transcript: never the answer itself.
+
+    `nothing_to_send` is True when the function took the message and had no answer, a 204
+    or a blank 200: not delivered, yet nothing went wrong. Callers read it rather than the
+    status, which cannot tell a blank 200 from an answer whose send failed.
+    """
 
     delivered: bool
     status: int | None
     summary: str
+    nothing_to_send: bool = False
 
 
 def read_household_secret(
@@ -142,7 +148,7 @@ def forward_household_command(
         return ForwardOutcome(delivered=False, status=None,
                               summary=f"Could not reach the household assistant ({type(error).__name__}).")
     if status == HTTPStatus.NO_CONTENT or (status == HTTPStatus.OK and not answer.strip()):
-        return ForwardOutcome(delivered=False, status=status,
+        return ForwardOutcome(delivered=False, nothing_to_send=True, status=status,
                               summary="The household assistant took the message and had nothing to send back.")
     if status != HTTPStatus.OK:
         return ForwardOutcome(delivered=False, status=status,

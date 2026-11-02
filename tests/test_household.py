@@ -95,18 +95,25 @@ class ForwardTest(unittest.TestCase):
     def test_no_content_sends_nothing(self):
         StubFunction.answer_status = 204
         outcome = self.forward()
-        self.assertEqual((outcome.delivered, outcome.status, self.imsg_run.calls), (False, 204, []))
+        self.assertEqual((outcome.delivered, outcome.nothing_to_send, outcome.status, self.imsg_run.calls),
+                         (False, True, 204, []))
+
+    def test_a_blank_answer_is_nothing_to_send_like_no_content(self):
+        StubFunction.answer_body = " \n"
+        outcome = self.forward()
+        self.assertEqual((outcome.delivered, outcome.nothing_to_send, outcome.status, self.imsg_run.calls),
+                         (False, True, 200, []))
 
     def test_a_refusal_sends_nothing_and_says_which(self):
         StubFunction.answer_status = 403
         outcome = self.forward()
-        self.assertEqual((outcome.delivered, self.imsg_run.calls), (False, []))
+        self.assertEqual((outcome.delivered, outcome.nothing_to_send, self.imsg_run.calls), (False, False, []))
         self.assertIn("403", outcome.summary)
 
     def test_a_failed_send_reports_imsgs_disposition_without_the_answer(self):
         self.imsg_run = RecordingRun(stdout='{"status":"error","disposition":"may_have_completed"}', returncode=1)
         outcome = self.forward()
-        self.assertFalse(outcome.delivered)
+        self.assertEqual((outcome.delivered, outcome.nothing_to_send), (False, False))
         self.assertIn("may_have_completed", outcome.summary)
         self.assertNotIn("oat milk", outcome.summary)
 
