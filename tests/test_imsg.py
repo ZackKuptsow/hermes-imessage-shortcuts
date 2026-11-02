@@ -27,19 +27,20 @@ class BuildSendArgumentsTest(unittest.TestCase):
 class SendMessageRefusalTest(unittest.TestCase):
     def test_a_handle_off_the_allow_list_is_refused_and_imsg_never_runs(self):
         run = RecordingRun()
-        with self.assertRaises(imsg.SendRefusedError):
+        with self.assertRaises(imsg.RecipientRefusedError):
             imsg.send_message("hi", PARTNER_PHONE, ALLOWED, IMSG_PATH, run=run)
         self.assertEqual(run.calls, [])
 
     def test_a_contact_name_is_refused_and_imsg_never_runs(self):
         run = RecordingRun()
-        with self.assertRaises(imsg.SendRefusedError):
+        with self.assertRaises(imsg.RecipientRefusedError):
             imsg.send_message("hi", "Zack", ALLOWED, IMSG_PATH, run=run)
         self.assertEqual(run.calls, [])
 
     def test_an_empty_text_is_refused(self):
+        # Its own class: the send endpoint answers it `empty`, not `sender`.
         run = RecordingRun()
-        with self.assertRaises(imsg.SendRefusedError):
+        with self.assertRaises(imsg.EmptyTextRefusedError):
             imsg.send_message("  \n", ZACK_PHONE, ALLOWED, IMSG_PATH, run=run)
         self.assertEqual(run.calls, [])
 
