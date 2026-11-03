@@ -31,7 +31,8 @@ class CanonicalHandleTest(unittest.TestCase):
 
     def test_a_nul_in_either_kind_of_handle_is_refused(self):
         # An argument cannot carry U+0000; an email holding one once matched the pattern.
-        for written in (f"{ZACK_PHONE}\x00", f"{ZACK_EMAIL}\x00", "zack\x00@example.com", "\x00zack@example.com"):
+        for written in (f"{ZACK_PHONE}\x00", "\x00zack@example.com", "zack\x00@example.com", "zack@exa\x00mple.com",
+                        f"{ZACK_EMAIL}\x00"):
             with self.subTest(written=written), self.assertRaises(handles.InvalidHandleError):
                 handles.canonical_handle(written)
 

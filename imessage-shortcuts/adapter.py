@@ -395,7 +395,7 @@ class ImessageShortcutsAdapter(BasePlatformAdapter):
         """
         text = self.format_message(content)
         try:
-            imsg.checked_recipient(text, handle, settings.allowed)
+            imsg.check_send(text, handle, settings.allowed)
         except imsg.SendRefusedError as error:
             logger.error(f"{LOG_PREFIX} {error}")
             return TextSent(result=SendResult(success=False, error=str(error)), refusal=error)

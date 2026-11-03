@@ -65,9 +65,9 @@ first (`403` off the loopback address, `503` while the platform is not serving, 
 without the secret), then `400` for a malformed body. The text leaves the way a reply does,
 through gate 3: a recipient off the allow list is a `204` with `X-Imessage-Dropped: sender`,
 and an empty text is a `400`, since the caller composed it and a `204` would read as
-success. So is a text holding a character no command-line argument can carry, a NUL or a
-lone surrogate: it is refused whole, before any of a long text goes out, and never sent
-altered. imsg never runs for any of these. `202` means imsg reported `sent`. `502` means
+success. So is a text holding a NUL or a lone surrogate, which imsg cannot be handed or
+Messages cannot show: it is refused whole, before any of a long text goes out, and never
+sent altered. imsg never runs for any of these. `202` means imsg reported `sent`. `502` means
 it did not, with imsg's word for why in a JSON body,
 `{"disposition": "not_started"}`, and never the text. It opens no session and checks no
 toolsets: no text reaches it, and the model has no tool that calls it. So while a widened

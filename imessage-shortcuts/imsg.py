@@ -42,7 +42,7 @@ class EmptyTextRefusedError(SendRefusedError):
 
 
 class UnsendableTextRefusedError(SendRefusedError):
-    """The text holds a character no argument can carry: U+0000, or a lone surrogate."""
+    """The text holds U+0000 or a lone surrogate, which imsg cannot be handed or Messages cannot show."""
 
 
 class ImsgMissingError(Exception):
@@ -122,11 +122,11 @@ def check_text_can_be_handed(text: str) -> None:
         raise UnsendableTextRefusedError("refusing to send a text holding a lone surrogate") from None
 
 
-def checked_recipient(text: str, handle: str, allowed_handles: tuple[str, ...]) -> str:
-    """The canonical form of *handle*, once a send of *text* to it has passed every refusal.
+def check_send(text: str, handle: str, allowed_handles: tuple[str, ...]) -> str:
+    """Refuse a send of *text* to *handle* this module will not attempt; else the handle's canonical form.
 
-    A caller that splits a text checks the whole text here first, so a refusal can never
-    arrive after part of it went out.
+    Checks the recipient, then the text. A caller that splits a text checks the whole text
+    here first, so a refusal can never arrive after part of it went out.
 
     Raises:
         RecipientRefusedError: the handle is not a handle or not on the allow list.
@@ -155,9 +155,9 @@ def send_message(
     """Send *text* to *handle* when the handle is on *allowed_handles*.
 
     Raises:
-        SendRefusedError: one of `checked_recipient`'s refusals. Nothing is sent.
+        SendRefusedError: one of `check_send`'s refusals. Nothing is sent.
     """
-    recipient = checked_recipient(text, handle, allowed_handles)
+    recipient = check_send(text, handle, allowed_handles)
     try:
         completed = run(build_send_arguments(imsg_path, recipient, text), capture_output=True, text=True,
                         timeout=SEND_TIMEOUT_SECONDS, check=False)
