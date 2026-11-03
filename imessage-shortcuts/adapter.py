@@ -55,6 +55,7 @@ from . import allowed_toolsets, handles, imsg, inbound
 
 DEFAULT_HOST = "127.0.0.1"
 DEFAULT_PORT = 8645
+DELIVERED_CHUNKS_KEY = "delivered_chunks"  # send_chunks's count on a partial send; the 502 body reuses the name
 DROPPED_HEADER = "X-Imessage-Dropped"
 ENV_ALLOW_ALL = "IMESSAGE_SHORTCUTS_ALLOW_ALL_USERS"
 ENV_ALLOWED_USERS = "IMESSAGE_SHORTCUTS_ALLOWED_USERS"
@@ -66,11 +67,13 @@ INGRESS_PATH = "/imessage"
 LOG_PREFIX = "[imessage_shortcuts]"
 LOOPBACK_ADDRESSES = frozenset({"127.0.0.1", "::1"})
 MAX_MESSAGE_LENGTH = 4000
+PARTIAL_OVERFLOW_KEY = "partial_overflow"  # send_chunks's mark of a send that failed after earlier chunks landed
 PLATFORM_NAME = "imessage_shortcuts"
 SEND_PATH = "/imessage/send"
 # The gateway commands a text may run (smart-home ADR 0035): a fresh session, stopping a
 # reply, and the two replies to /new's confirmation. Any other reaches the model as words.
 TEXT_COMMANDS = frozenset({"approve", "cancel", "new", "reset", "stop"})
+TOTAL_CHUNKS_KEY = "total_chunks"  # send_chunks's count on a partial send; the 502 body reuses the name
 TRUTHY_VALUES = frozenset({"1", "true", "yes", "on"})
 
 logger = logging.getLogger(__name__)
@@ -104,6 +107,21 @@ class TextSent:
     result: SendResult
     disposition: str | None = None  # imsg's word for the chunk it did not send
     refusal: imsg.SendRefusedError | None = None  # imsg.send_message's, when imsg never ran
+
+    def failure_body(self) -> dict[str, object]:
+        """The send endpoint's 502 body: imsg's disposition, never the text.
+
+        After a send that failed past its first chunk it also says how many chunks imsg
+        reported `sent` before the one that failed, of how many in all, read from the counts
+        Hermes's `send_chunks` puts in `raw_response`. A failure on the first chunk sets none,
+        so its body is the disposition alone.
+        """
+        body: dict[str, object] = {"disposition": self.disposition or imsg.DISPOSITION_UNKNOWN}
+        progress = self.result.raw_response
+        if isinstance(progress, dict) and progress.get(PARTIAL_OVERFLOW_KEY):
+            body[DELIVERED_CHUNKS_KEY] = progress[DELIVERED_CHUNKS_KEY]
+            body[TOTAL_CHUNKS_KEY] = progress[TOTAL_CHUNKS_KEY]
+        return body
 
 
 @dataclass(frozen=True)
@@ -353,7 +371,8 @@ class ImessageShortcutsAdapter(BasePlatformAdapter):
         surrogate): the caller composed it, so either is the caller's bug, which a 204
         would pass off as success. A 204 with X-Imessage-Dropped `sender` for a recipient off
         the allow list. 202 when imsg reported `sent`; 502 when it did not, with imsg's
-        disposition in a JSON body. No session, no duplicate check and no toolset check:
+        disposition in a JSON body, and the chunk counts when it failed partway
+        (`TextSent.failure_body`). No session, no duplicate check and no toolset check:
         this is a send, not a text to Hermes, and the alarm about a widened profile, whose
         texts the ingress answers 503, must still go out. That holds until the next
         connect, whose start checks refuse the profile and leave both routes answering 503.
@@ -373,7 +392,7 @@ class ImessageShortcutsAdapter(BasePlatformAdapter):
             logger.warning(f"{LOG_PREFIX} refused a send request: its text cannot be sent")
             return web.Response(status=400)
         if not sent.result.success:
-            return web.json_response({"disposition": sent.disposition or imsg.DISPOSITION_UNKNOWN}, status=502)
+            return web.json_response(sent.failure_body(), status=502)
         logger.info(f"{LOG_PREFIX} sent a text for a loopback caller")
         return web.Response(status=202)
 

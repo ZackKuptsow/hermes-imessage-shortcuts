@@ -32,6 +32,7 @@ from support import (
 ALARM = "The texting path failed: plugin answered 503 at 17:02"
 # The header and the paths are the contract with n8n, so the tests spell them out.
 DROPPED_HEADER = "X-Imessage-Dropped"
+IMSG_MAY_HAVE_COMPLETED = '{"status": "error", "disposition": "may_have_completed"}'
 IMSG_NOT_STARTED = '{"status": "error", "disposition": "not_started"}'
 IMSG_SENT = '{"status": "sent"}'
 INGRESS = "/imessage"
@@ -111,6 +112,22 @@ class AdapterTest(unittest.IsolatedAsyncioTestCase):
             f"#!{sys.executable}\nimport json, os, sys\n"
             "open(os.environ['FAKE_IMSG_RECORD'], 'a').write(json.dumps(sys.argv[1:]) + '\\n')\n"
             f"print({answer!r})\nsys.exit({exit_code})\n")
+        self.fake_imsg.chmod(self.fake_imsg.stat().st_mode | stat.S_IXUSR)
+
+    def fake_imsg_answers_in_turn(self, *answers: tuple[str, int]) -> None:
+        """The stand-in imsg: records each call, then answers its nth recorded call with the nth (answer, exit code).
+
+        It counts the lines already in the record to know which call it is, so a test that sent
+        anything before clears `self.record` first; the last answer repeats.
+        """
+        self.fake_imsg.write_text(
+            f"#!{sys.executable}\nimport json, os, sys\n"
+            "record = os.environ['FAKE_IMSG_RECORD']\n"
+            "call_index = len(open(record).readlines()) if os.path.exists(record) else 0\n"
+            "open(record, 'a').write(json.dumps(sys.argv[1:]) + '\\n')\n"
+            f"answers = {list(answers)!r}\n"
+            "answer, exit_code = answers[min(call_index, len(answers) - 1)]\n"
+            "print(answer)\nsys.exit(exit_code)\n")
         self.fake_imsg.chmod(self.fake_imsg.stat().st_mode | stat.S_IXUSR)
 
     def imsg_calls(self) -> list[list[str]]:
@@ -571,6 +588,37 @@ class AdapterTest(unittest.IsolatedAsyncioTestCase):
         status, dropped, body = await self.send_request(self.alarm())
         self.assertEqual((status, dropped, json.loads(body)), (502, None, {"disposition": "not_started"}))
         self.assertNotIn(b"texting path", body)
+
+    async def test_a_send_that_fails_partway_says_how_many_chunks_imsg_reported_sent(self):
+        # imsg's `not_started` alone would read as safe to retry, and a retry would resend the chunks that landed.
+        await self.start_adapter()
+        # The second case fails mid-text, so its counts are neither 1 nor one short of the total,
+        # and the chunk after the failing one must never go out.
+        cases = (
+            ("the second of two fails", "word " * 1500, [(IMSG_SENT, 0), (IMSG_NOT_STARTED, 1)],
+             {"delivered_chunks": 1, "disposition": "not_started", "total_chunks": 2}),
+            ("the third of four fails", "word " * 2500, [(IMSG_SENT, 0), (IMSG_SENT, 0), (IMSG_MAY_HAVE_COMPLETED, 1)],
+             {"delivered_chunks": 2, "disposition": "may_have_completed", "total_chunks": 4}),
+        )
+        for label, text, answers, expected_body in cases:
+            with self.subTest(label):
+                self.record.unlink(missing_ok=True)
+                self.fake_imsg_answers_in_turn(*answers)
+                status, dropped, body = await self.send_request(self.alarm(text=text))
+                self.assertEqual((status, dropped, json.loads(body)), (502, None, expected_body))
+                self.assertNotIn(b"word", body)
+                attempted = expected_body["delivered_chunks"] + 1
+                suffixes = [call[2].rsplit(" ", 1)[-1] for call in self.imsg_calls()]
+                total = expected_body["total_chunks"]
+                self.assertEqual(suffixes, [f"({number}/{total})" for number in range(1, attempted + 1)])
+
+    async def test_a_long_send_whose_first_chunk_fails_answers_its_disposition_alone(self):
+        # Nothing went out, so there is no count to report and a not_started stays safe to retry.
+        self.fake_imsg_answers(IMSG_NOT_STARTED, exit_code=1)
+        await self.start_adapter()
+        status, dropped, body = await self.send_request(self.alarm(text="word " * 1500))
+        self.assertEqual((status, dropped, json.loads(body)), (502, None, {"disposition": "not_started"}))
+        self.assertEqual(len(self.imsg_calls()), 1)
 
     async def test_a_peer_off_the_loopback_address_is_refused_by_both_routes(self):
         # The listener binds the loopback address alone, so no test can connect from elsewhere:
