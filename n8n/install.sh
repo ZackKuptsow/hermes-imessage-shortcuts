@@ -419,7 +419,7 @@ main() {
   if [[ "${#changes[@]}" -eq 0 ]]; then
     say "nothing to do; n8n ${N8N_VERSION} answers at ${HEALTH_URL} and listens on ${LISTEN_ADDRESS} alone"
   else
-    say "done, ${#changes[@]} changes; n8n ${N8N_VERSION} answers at ${HEALTH_URL} and listens on ${LISTEN_ADDRESS} alone"
+    say "done, changes made: ${#changes[@]}; n8n ${N8N_VERSION} answers at ${HEALTH_URL} and listens on ${LISTEN_ADDRESS} alone"
   fi
 }
 
