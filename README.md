@@ -75,7 +75,7 @@ as several chunks, and when one after the first fails the body also says how far
 `delivered_chunks` counts the chunks imsg reported `sent` before the one that failed, whose
 own disposition still applies to it (with `may_have_completed` it may have arrived too). A
 `502` carrying the counts is not safe to retry whole, whatever its disposition: a retry
-would resend the chunks already delivered. It opens no session and checks no
+would resend the chunks already sent. The endpoint opens no session and checks no
 toolsets: no text reaches it, and the model has no tool that calls it. So while a widened
 profile has every text answered `503`, the alarm about it still goes out, until the
 platform next connects. A reconnect or a restart reruns the start checks, which refuse the

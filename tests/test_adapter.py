@@ -115,9 +115,10 @@ class AdapterTest(unittest.IsolatedAsyncioTestCase):
         self.fake_imsg.chmod(self.fake_imsg.stat().st_mode | stat.S_IXUSR)
 
     def fake_imsg_answers_in_turn(self, *answers: tuple[str, int]) -> None:
-        """The stand-in imsg: records each call, then answers its nth call with the nth (answer, exit code).
+        """The stand-in imsg: records each call, then answers its nth recorded call with the nth (answer, exit code).
 
-        It counts the calls already recorded to know which call it is; the last answer repeats.
+        It counts the lines already in the record to know which call it is, so a test that sent
+        anything before clears `self.record` first; the last answer repeats.
         """
         self.fake_imsg.write_text(
             f"#!{sys.executable}\nimport json, os, sys\n"
@@ -591,11 +592,13 @@ class AdapterTest(unittest.IsolatedAsyncioTestCase):
     async def test_a_send_that_fails_partway_says_how_many_chunks_imsg_reported_sent(self):
         # imsg's `not_started` alone would read as safe to retry, and a retry would resend the chunks that landed.
         await self.start_adapter()
+        # The second case fails mid-text, so its counts are neither 1 nor one short of the total,
+        # and the chunk after the failing one must never go out.
         cases = (
             ("the second of two fails", "word " * 1500, [(IMSG_SENT, 0), (IMSG_NOT_STARTED, 1)],
              {"delivered_chunks": 1, "disposition": "not_started", "total_chunks": 2}),
-            ("the third of three fails", "word " * 2000, [(IMSG_SENT, 0), (IMSG_SENT, 0), (IMSG_MAY_HAVE_COMPLETED, 1)],
-             {"delivered_chunks": 2, "disposition": "may_have_completed", "total_chunks": 3}),
+            ("the third of four fails", "word " * 2500, [(IMSG_SENT, 0), (IMSG_SENT, 0), (IMSG_MAY_HAVE_COMPLETED, 1)],
+             {"delivered_chunks": 2, "disposition": "may_have_completed", "total_chunks": 4}),
         )
         for label, text, answers, expected_body in cases:
             with self.subTest(label):
@@ -604,9 +607,10 @@ class AdapterTest(unittest.IsolatedAsyncioTestCase):
                 status, dropped, body = await self.send_request(self.alarm(text=text))
                 self.assertEqual((status, dropped, json.loads(body)), (502, None, expected_body))
                 self.assertNotIn(b"word", body)
-                total = expected_body["total_chunks"]
+                attempted = expected_body["delivered_chunks"] + 1
                 suffixes = [call[2].rsplit(" ", 1)[-1] for call in self.imsg_calls()]
-                self.assertEqual(suffixes, [f"({number}/{total})" for number in range(1, total + 1)])
+                total = expected_body["total_chunks"]
+                self.assertEqual(suffixes, [f"({number}/{total})" for number in range(1, attempted + 1)])
 
     async def test_a_long_send_whose_first_chunk_fails_answers_its_disposition_alone(self):
         # Nothing went out, so there is no count to report and a not_started stays safe to retry.
