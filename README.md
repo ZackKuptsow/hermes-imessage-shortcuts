@@ -220,7 +220,7 @@ contract is `POST /` with a JSON body of `sender`, `sent_at` and `text` and the 
 | `bin/imessage-reply` | sends one iMessage, only to a handle on the allow list; a check that imsg works |
 | `bin/household-forward` | forwards one command from a terminal; prints only whether the answer was delivered |
 | `n8n/` | n8n as its own macOS user under a LaunchDaemon, for the relay to come: `install.sh`, `watch-egress.sh`, the plist in `launchd/`, and its own `README.md` |
-| `tests/` | the plugin's and the scripts' tests, and `test_n8n_launchd.py`, which holds the n8n plist to the design |
+| `tests/` | the plugin's and the scripts' tests; `test_n8n_launchd.py`, which holds the n8n plist to the design; and `test_n8n_install.py`, which runs `n8n/install.sh` step by step with root's commands stood in for |
 
 ## Tests
 
@@ -231,7 +231,7 @@ python3 -m unittest discover -s tests -p 'test_*.py'
 ```
 
 The adapter's suite needs Hermes's own environment (`gateway`, `aiohttp`) and skips without
-it. The full run, 139 tests, is:
+it. The full run, 161 tests, is:
 
 ```sh
 IMESSAGE_SHORTCUTS_TESTS_REQUIRE_HERMES=1 hermes --run-module unittest discover -s tests -p 'test_*.py'

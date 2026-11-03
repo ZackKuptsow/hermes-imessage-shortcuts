@@ -30,12 +30,12 @@ Three runs of one script and a watch beside it. The order matters: downloading n
 which is when it would first call home.
 
 1. `sudo n8n/install.sh` makes the `_n8n` group and user (GID and UID 450, no password,
-   home `/var/n8n`), checks that `_n8n` cannot list your home, makes `/var/n8n`, and installs
-   the pinned n8n as `_n8n`. It writes the LaunchDaemon, then stops with exit 4 before
-   starting it, saying the egress watch is not running.
+   home `/var/n8n`), checks that `_n8n` can neither list nor enter your home, makes
+   `/var/n8n`, and installs the pinned n8n as `_n8n`. It writes the LaunchDaemon, then stops
+   with exit 4 before starting it, saying the egress watch is not running.
 2. In a terminal of its own: `sudo n8n/watch-egress.sh`. Leave it a day.
-3. `sudo n8n/install.sh` again starts the daemon, waits for n8n's health check, and stops it
-   again if anything of `_n8n` listens beyond `127.0.0.1`.
+3. `sudo n8n/install.sh` again starts the daemon, waits for n8n's health check, and disables
+   and stops it if anything of `_n8n` listens beyond `127.0.0.1`.
 4. `sudo n8n/install.sh` a third time says `nothing to do`. Any later run that finds
    everything in place says the same and changes nothing.
 5. **The owner account**, once, in a browser on the Mac at `http://127.0.0.1:5678`, before
@@ -43,10 +43,17 @@ which is when it would first call home.
    manager, not the browser's. Nothing here records either. Skip any offer of free paid
    features: it sends your email address to n8n.
 
-`install.sh` refuses, without changing anything, when what it finds is not its own: a `_n8n`
-whose record differs (another UID, shell or home, or a password), UID 450 held by another
-name, `/var/n8n` owned by someone else, or another user on port 5678 or 5679. It also refuses
-to go on while `_n8n` can list your home.
+`install.sh` stops at the first thing it finds that is not its own, and changes nothing of it:
+another user on port 5678 or 5679 (checked before anything is made), a `_n8n` whose record
+differs (another UID, shell or home, or a password), UID 450 held by another name, `/var/n8n`
+or a directory in it owned by someone else, or a log file that is a link, has a second name,
+or is not `_n8n`'s. It also refuses to go on while `_n8n` can list or enter your home. Run as
+root, it reads `_n8n`'s files as data and never runs one, since `_n8n` could have rewritten
+any of them.
+
+A run that stops partway, after writing a new plist or installing a new n8n but before
+telling launchd, leaves a marker in `/var/run`, and the next run does the reload or restart
+it left. It never says `nothing to do` while one is pending.
 
 The account is made with `dscl`, the way macOS makes its own daemon accounts, not with
 `sysadminctl -roleAccount`: that ignores `-home` (it sets `/var/empty`), gives the account a
@@ -69,7 +76,10 @@ Each is a gate from the design, broken or read the way it fails.
 - **Listens on the loopback address alone**, for n8n and its task broker alike:
   `sudo lsof -nP -iTCP -sTCP:LISTEN -a -u _n8n` shows `127.0.0.1:5678` and `127.0.0.1:5679`
   and nothing else; `curl -s -o /dev/null -w '%{http_code}\n' http://127.0.0.1:5678/healthz`
-  prints `200`.
+  prints `200`. When a run of `install.sh` finds a listener beyond the loopback address, even
+  from an n8n that never answered its health check, it disables the daemon before stopping it,
+  so a restart of the Mac cannot start it again; `launchctl print-disabled system` lists
+  it as disabled until a later run starts it.
 - **Reads nothing of yours.** Each of these fails:
   `sudo -u _n8n ls /Users/zack`,
   `sudo -u _n8n cat ~/.hermes/profiles/imessage/data/imessage/zack-handles.txt`,
@@ -99,9 +109,17 @@ read.
 
 ## Upgrading
 
-Change `N8N_VERSION` at the top of `install.sh` and run it again: it installs that version
-over the old one and restarts the daemon. n8n 2.x is supported until about December 2027;
-before then the workflows move to n8n 3.x, which ships as a Docker image alone.
+First copy the database: a new n8n migrates it on its first start, and n8n does not support
+running an older version on a migrated database, so never lower `N8N_VERSION`; the copy is
+the way back. SQLite's own backup is safe while n8n runs:
+
+```sh
+sudo sqlite3 /var/n8n/.n8n/database.sqlite ".backup '/Users/zack/n8n-database-before-upgrade.sqlite'"
+```
+
+Then change `N8N_VERSION` at the top of `install.sh` and run it again: it installs that
+version over the old one and restarts the daemon. n8n 2.x is supported until about December
+2027; before then the workflows move to n8n 3.x, which ships as a Docker image alone.
 
 ## Uninstalling
 
@@ -111,4 +129,5 @@ sudo rm /Library/LaunchDaemons/com.zack.hermes-imessage.n8n.plist
 ```
 
 `/var/n8n` and the `_n8n` user stay: `/var/n8n/.n8n` holds the database and the encryption
-key, and running `install.sh` again picks both up where they were.
+key, and running `install.sh` again picks both up where they were. Like the first start, that
+start waits for the egress watch, and exits 4 until it runs.

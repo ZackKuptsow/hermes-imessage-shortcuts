@@ -4,24 +4,26 @@
 # service and hardening"). Run by hand with sudo, on the Mac Studio alone (n8n/README.md).
 # In order, stopping at the first refusal:
 #   1. refuses unless it runs as root, on the Mac Studio, with Homebrew's node where the
-#      plist starts it and new enough for n8n;
+#      plist starts it and new enough for n8n, and while another user listens on n8n's port
+#      or its task broker's;
 #   2. makes the `_n8n` group and user, GID and UID 450, with no password and its home at
 #      /var/n8n, or refuses one that exists otherwise, or the ID held by another name; then
-#      refuses if `_n8n` can list the home of whoever ran this;
+#      refuses if `_n8n` can list or enter the home of whoever ran this;
 #   3. makes /var/n8n, its log directory and its data directory, and sets the owner, group
 #      and mode of those three directories alone, never of anything in them: /var/n8n/.n8n
 #      holds the encryption key and the database. Refuses one that someone else owns;
 #   4. installs the pinned n8n as `_n8n`, unless that version is already installed;
 #   5. makes the three log files group admin, mode 640, so Zack can tail them without sudo;
 #   6. copies the repository's plist to /Library/LaunchDaemons when the installed copy differs;
-#   7. refuses while another user listens on n8n's port or its task broker's;
-#   8. starts the daemon. The first start waits for the egress watch (n8n/watch-egress.sh),
-#      since that start is when n8n would first call home. A changed plist is booted out and
-#      in again, since launchd keeps the definition it loaded; a new n8n version is restarted;
-#   9. waits for n8n's health check, then stops the daemon again if anything of `_n8n`
-#      listens on an address other than 127.0.0.1.
+#   7. starts the daemon. A start waits for the egress watch (n8n/watch-egress.sh), since a
+#      start is when n8n would call home. A changed plist is booted out and in again, since
+#      launchd keeps the definition it loaded; a new n8n version is restarted;
+#   8. waits for n8n's health check, and disables and stops the daemon if anything of `_n8n`
+#      listens on an address other than 127.0.0.1, whether or not n8n answered.
 # A run with nothing to change says so and exits 0. It never deletes the user, never touches
-# what /var/n8n/.n8n holds and never removes anything: uninstalling is in n8n/README.md.
+# what /var/n8n/.n8n holds, and removes nothing but its own markers: uninstalling is in
+# n8n/README.md. As root it reads nothing `_n8n` could have written as code, and changes no
+# file in `_n8n`'s directories that `_n8n` could have pointed elsewhere.
 set -uo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -70,6 +72,11 @@ DAEMON_PLIST_MODE=644
 # Written by watch-egress.sh while it runs; the same path is named there.
 EGRESS_WATCH_NAME="watch-egress.sh"
 EGRESS_WATCH_PIDFILE="/var/run/${DAEMON_LABEL}.egress-watch.pid"
+# Work a run began that launchd has not been told of: written before the plist or n8n
+# changes, removed once launchd has the change. A run that stops between the two leaves the
+# marker for the next, which would otherwise find the files in place and say nothing to do.
+RELOAD_PENDING_MARKER="/var/run/${DAEMON_LABEL}.reload-pending"
+RESTART_PENDING_MARKER="/var/run/${DAEMON_LABEL}.restart-pending"
 
 LISTEN_ADDRESS="127.0.0.1"
 N8N_PORT=5678
@@ -87,8 +94,6 @@ INSTALL_EXIT_UNHEALTHY=5
 
 # What this run changed, one line each; none at the end means there was nothing to do.
 changes=()
-plist_replaced=false
-n8n_upgraded=false
 
 say() {
   printf 'n8n install: %s\n' "$*"
@@ -179,49 +184,51 @@ ensure_user() {
   changed "made the role account ${N8N_USER} (UID ${N8N_UID}), home ${N8N_HOME}, no password"
 }
 
-# check_isolation: fails closed before n8n runs as a user that can enter Zack's home. The probe
-# is the gate itself, not one cause of it, so it also catches a widened home or a new group.
+# check_isolation: fails closed before n8n runs as a user that can list or enter Zack's home;
+# entering is enough to read any file inside whose own mode lets others read it. The probe is
+# the gate itself, not one cause of it, so it also catches a widened home or a new group, and
+# it must first be seen to run at all: a sudo that fails would read as isolation.
 check_isolation() {
   local home
   home="$(directory_record "/Users/${SUDO_USER}" NFSHomeDirectory)"
   [[ -d "$home" ]] || refuse "cannot find the home of ${SUDO_USER}"
-  if sudo -u "$N8N_USER" /bin/ls "$home" >/dev/null 2>&1; then
-    refuse "${N8N_USER} can list ${home}, so n8n could read your files; its groups are $(id -Gn "$N8N_USER")"
+  sudo -u "$N8N_USER" /usr/bin/true \
+    || refuse "cannot run a command as ${N8N_USER}, so cannot check what it can reach"
+  if sudo -u "$N8N_USER" /bin/ls "$home" >/dev/null 2>&1 || sudo -u "$N8N_USER" /bin/test -x "$home"; then
+    refuse "${N8N_USER} can list or enter ${home}, so n8n could read your files; its groups are $(id -Gn "$N8N_USER")"
   fi
 }
 
 # ensure_directory <path> <owner> <group> <mode>: the directory itself, never its contents.
-# A directory owned by someone else is refused; an empty one owned by root is taken over,
-# since that is what sysadminctl may leave for a home it was told about.
+# A directory owned by someone else is refused. The changes take -h: `_n8n` owns /var/n8n,
+# so between the check and the change it could swap a directory in it for a link, and root
+# must change the link rather than what it points at.
 ensure_directory() {
   local path="$1" owner="$2" group="$3" mode="$4" current_owner
-  if [[ ! -e "$path" ]]; then
+  if [[ ! -e "$path" && ! -L "$path" ]]; then
     install -d -o "$owner" -g "$group" -m "$mode" "$path" || refuse "could not make ${path}"
     changed "made ${path} (${owner}:${group}, ${mode})"
     return 0
   fi
   [[ -d "$path" && ! -L "$path" ]] || refuse "${path} exists and is not a directory"
   current_owner="$(stat -f %Su "$path")"
-  if [[ "$current_owner" == "$ROOT_USER" && "$owner" != "$ROOT_USER" ]]; then
-    [[ -z "$(ls -A "$path")" ]] || refuse "${path} is owned by root and not empty; it is not this install's"
-    chown "$owner" "$path" || refuse "could not give ${path} to ${owner}"
-    changed "took over the empty ${path} for ${owner}"
-  elif [[ "$current_owner" != "$owner" ]]; then
-    refuse "${path} is owned by ${current_owner}, not ${owner}; it is not this install's"
-  fi
+  [[ "$current_owner" == "$owner" ]] \
+    || refuse "${path} is owned by ${current_owner}, not ${owner}; it is not this install's"
   if [[ "$(stat -f %Sg "$path")" != "$group" ]]; then
-    chgrp "$group" "$path" || refuse "could not set the group of ${path}"
+    chgrp -h "$group" "$path" || refuse "could not set the group of ${path}"
     changed "set the group of ${path} to ${group}"
   fi
   if [[ "$(stat -f %Lp "$path")" != "$mode" ]]; then
-    chmod "$mode" "$path" || refuse "could not set the mode of ${path}"
+    chmod -h "$mode" "$path" || refuse "could not set the mode of ${path}"
     changed "set the mode of ${path} to ${mode}"
   fi
 }
 
+# installed_n8n_version: read as data. `_n8n` owns the file, so it could make package.json a
+# link to code, and Node's require would run that code as root.
 installed_n8n_version() {
   [[ -f "$N8N_PACKAGE_JSON" ]] || return 0
-  "$NODE_PATH" -p 'require(process.argv[1]).version' "$N8N_PACKAGE_JSON"
+  plutil -extract version raw -o - "$N8N_PACKAGE_JSON"
 }
 
 ensure_n8n() {
@@ -229,6 +236,7 @@ ensure_n8n() {
   installed="$(installed_n8n_version)" || refuse "could not read the installed n8n's version from ${N8N_PACKAGE_JSON}"
   [[ "$installed" != "$N8N_VERSION" ]] || return 0
   say "installing n8n ${N8N_VERSION} as ${N8N_USER}: _n8n's one outbound connection, to the npm registry"
+  touch "$RESTART_PENDING_MARKER" || refuse "could not write ${RESTART_PENDING_MARKER}"
   # Install scripts stay allowed: sqlite fetches its prebuilt binary. The working directory
   # is _n8n's own home, since npm cannot start in a directory _n8n cannot read.
   (cd "$N8N_HOME" && sudo -u "$N8N_USER" env HOME="$N8N_HOME" PATH="$(dirname "$NODE_PATH"):/usr/bin:/bin" \
@@ -236,23 +244,32 @@ ensure_n8n() {
     || refuse "npm could not install n8n ${N8N_VERSION}"
   [[ "$(installed_n8n_version)" == "$N8N_VERSION" ]] || refuse "npm finished but ${N8N_PACKAGE_JSON} is not ${N8N_VERSION}"
   changed "installed n8n ${N8N_VERSION}${installed:+ over ${installed}}"
-  n8n_upgraded=true
+}
+
+# check_log_file <path>: the file root is about to change sits in a directory `_n8n` owns, so
+# it must still be the plain file made for `_n8n`. A link, or a second name for another file,
+# would hand root's change to whatever `_n8n` pointed it at.
+check_log_file() {
+  [[ -f "$1" && ! -L "$1" ]] || refuse "$1 is not a plain file; it is not this install's"
+  [[ "$(stat -f %Su "$1")" == "$N8N_USER" ]] || refuse "$1 is not ${N8N_USER}'s; it is not this install's"
+  [[ "$(stat -f %l "$1")" == 1 ]] || refuse "$1 is one of several names for a file; it is not this install's"
 }
 
 ensure_log_files() {
   local log_file
   for log_file in "${LOG_FILES[@]}"; do
-    if [[ ! -e "$log_file" ]]; then
+    if [[ ! -e "$log_file" && ! -L "$log_file" ]]; then
       install -o "$N8N_USER" -g "$ADMIN_GROUP" -m "$LOG_FILE_MODE" /dev/null "$log_file" || refuse "could not make ${log_file}"
       changed "made ${log_file} (${N8N_USER}:${ADMIN_GROUP}, ${LOG_FILE_MODE})"
       continue
     fi
+    check_log_file "$log_file"
     if [[ "$(stat -f %Sg "$log_file")" != "$ADMIN_GROUP" ]]; then
-      chgrp "$ADMIN_GROUP" "$log_file" || refuse "could not set the group of ${log_file}"
+      chgrp -h "$ADMIN_GROUP" "$log_file" || refuse "could not set the group of ${log_file}"
       changed "set the group of ${log_file} to ${ADMIN_GROUP}"
     fi
     if [[ "$(stat -f %Lp "$log_file")" != "$LOG_FILE_MODE" ]]; then
-      chmod "$LOG_FILE_MODE" "$log_file" || refuse "could not set the mode of ${log_file}"
+      chmod -h "$LOG_FILE_MODE" "$log_file" || refuse "could not set the mode of ${log_file}"
       changed "set the mode of ${log_file} to ${LOG_FILE_MODE}"
     fi
   done
@@ -263,10 +280,10 @@ ensure_daemon_plist() {
   if [[ -f "$DAEMON_PATH" ]] && cmp -s "$DAEMON_TEMPLATE" "$DAEMON_PATH"; then
     return 0
   fi
+  touch "$RELOAD_PENDING_MARKER" || refuse "could not write ${RELOAD_PENDING_MARKER}"
   install -o "$ROOT_USER" -g "$WHEEL_GROUP" -m "$DAEMON_PLIST_MODE" "$DAEMON_TEMPLATE" "$DAEMON_PATH" \
     || refuse "could not write ${DAEMON_PATH}"
   changed "wrote ${DAEMON_PATH}"
-  plist_replaced=true
 }
 
 daemon_loaded() {
@@ -303,30 +320,40 @@ wait_for_bootout() {
   done
 }
 
+# load_daemon: enabled first, since a run that found n8n listening beyond the loopback address
+# disabled it. Loading reads the plist afresh and starts the installed n8n, which finishes
+# whatever either marker says is pending.
+load_daemon() {
+  launchctl enable "$DAEMON_SERVICE" || refuse "launchctl could not enable ${DAEMON_LABEL}"
+  launchctl bootstrap system "$DAEMON_PATH" || refuse "launchctl could not bootstrap ${DAEMON_PATH}"
+  rm -f "$RELOAD_PENDING_MARKER" "$RESTART_PENDING_MARKER" || refuse "could not remove the markers in /var/run"
+}
+
 start_daemon() {
   if ! daemon_loaded; then
     if ! egress_watch_running; then
       printf 'n8n install: %s\n' \
-        "everything is in place, but n8n has not started. Its first start is when it would" \
-        "call home, so start the egress watch in another terminal first:" \
+        "everything is in place, but n8n is not running. A start is when it would call home," \
+        "so start the egress watch in another terminal first:" \
         "  sudo ${SCRIPT_DIR}/${EGRESS_WATCH_NAME}" \
         "then run this again." >&2
       exit "$INSTALL_EXIT_WAITING_FOR_WATCH"
     fi
-    launchctl bootstrap system "$DAEMON_PATH" || refuse "launchctl could not bootstrap ${DAEMON_PATH}"
+    load_daemon
     changed "started ${DAEMON_LABEL} at $(date '+%Y-%m-%dT%H:%M:%S%z')"
-  elif [[ "$plist_replaced" == true ]]; then
+  elif [[ -e "$RELOAD_PENDING_MARKER" ]]; then
     launchctl bootout "$DAEMON_SERVICE" || refuse "launchctl could not boot out ${DAEMON_LABEL}"
     wait_for_bootout
-    launchctl bootstrap system "$DAEMON_PATH" || refuse "launchctl could not bootstrap ${DAEMON_PATH}"
+    load_daemon
     changed "reloaded ${DAEMON_LABEL} with the new plist"
-  elif [[ "$n8n_upgraded" == true ]]; then
+  elif [[ -e "$RESTART_PENDING_MARKER" ]]; then
     launchctl kickstart -k "$DAEMON_SERVICE" || refuse "launchctl could not restart ${DAEMON_LABEL}"
+    rm -f "$RESTART_PENDING_MARKER" || refuse "could not remove ${RESTART_PENDING_MARKER}"
     changed "restarted ${DAEMON_LABEL} on n8n ${N8N_VERSION}"
   fi
 }
 
-wait_for_health() {
+n8n_answers() {
   local waited=0 status
   while (( waited < HEALTH_WAIT_SECONDS )); do
     status="$(curl -s -o /dev/null -w '%{http_code}' --max-time "$HEALTH_POLL_SECONDS" "$HEALTH_URL")"
@@ -334,24 +361,50 @@ wait_for_health() {
     sleep "$HEALTH_POLL_SECONDS"
     waited=$((waited + HEALTH_POLL_SECONDS))
   done
-  printf 'n8n install: %s did not answer %s within %ss; read %s/launchd.err.log and n8n.log\n' \
-    "$HEALTH_URL" "$HEALTH_OK_STATUS" "$HEALTH_WAIT_SECONDS" "$N8N_LOG_DIRECTORY" >&2
-  exit "$INSTALL_EXIT_UNHEALTHY"
+  return 1
 }
 
-# Fails closed: n8n listening anywhere but the loopback address puts the relay on the LAN.
-check_listen_addresses() {
-  local listeners outside
-  listeners="$(lsof -nP -iTCP -sTCP:LISTEN -a -u "$N8N_USER" -Fn | sed -n 's/^n//p')"
-  [[ -n "$listeners" ]] || refuse "n8n answers its health check, but ${N8N_USER} holds no listening socket"
-  outside="$(printf '%s\n' "$listeners" | grep -v "^${LISTEN_ADDRESS//./\\.}:")"
+# n8n_listeners: the address and port of every socket `_n8n` listens on, one a line.
+n8n_listeners() {
+  lsof -nP -iTCP -sTCP:LISTEN -a -u "$N8N_USER" -Fn | sed -n 's/^n//p'
+}
+
+# stop_if_listening_beyond_loopback <listeners>: fails closed, since n8n listening anywhere
+# but the loopback address puts the relay on the LAN. Disabled before it is stopped, so a
+# restart of the Mac cannot start it again before a run of this script has checked it.
+stop_if_listening_beyond_loopback() {
+  local outside
+  outside="$(printf '%s\n' "$1" | grep -v "^${LISTEN_ADDRESS//./\\.}:")"
   [[ -z "$outside" ]] && return 0
-  launchctl bootout "$DAEMON_SERVICE"
-  refuse "stopped n8n: ${N8N_USER} listened beyond ${LISTEN_ADDRESS}, on ${outside//$'\n'/, }"
+  outside="${outside//$'\n'/, }"
+  launchctl disable "$DAEMON_SERVICE" \
+    || printf 'n8n install: launchctl could not disable %s; a restart of the Mac starts it again\n' \
+      "$DAEMON_LABEL" >&2
+  launchctl bootout "$DAEMON_SERVICE" \
+    || refuse "${N8N_USER} listens beyond ${LISTEN_ADDRESS}, on ${outside}, and launchctl could not stop it;" \
+      "stop it with: sudo launchctl bootout ${DAEMON_SERVICE}"
+  refuse "stopped and disabled n8n: ${N8N_USER} listened beyond ${LISTEN_ADDRESS}, on ${outside}"
+}
+
+# check_daemon: n8n answers on the loopback address and listens nowhere else. Its listeners
+# are read even when it does not answer: an n8n that never answers on 127.0.0.1 may be
+# listening somewhere else.
+check_daemon() {
+  local listeners
+  if ! n8n_answers; then
+    stop_if_listening_beyond_loopback "$(n8n_listeners)"
+    printf 'n8n install: %s did not answer %s within %ss; read %s/launchd.err.log and n8n.log\n' \
+      "$HEALTH_URL" "$HEALTH_OK_STATUS" "$HEALTH_WAIT_SECONDS" "$N8N_LOG_DIRECTORY" >&2
+    exit "$INSTALL_EXIT_UNHEALTHY"
+  fi
+  listeners="$(n8n_listeners)"
+  [[ -n "$listeners" ]] || refuse "n8n answers its health check, but ${N8N_USER} holds no listening socket"
+  stop_if_listening_beyond_loopback "$listeners"
 }
 
 main() {
   check_machine
+  check_ports
   ensure_group
   ensure_user
   check_isolation
@@ -361,10 +414,8 @@ main() {
   ensure_n8n
   ensure_log_files
   ensure_daemon_plist
-  check_ports
   start_daemon
-  wait_for_health
-  check_listen_addresses
+  check_daemon
   if [[ "${#changes[@]}" -eq 0 ]]; then
     say "nothing to do; n8n ${N8N_VERSION} answers at ${HEALTH_URL} and listens on ${LISTEN_ADDRESS} alone"
   else
