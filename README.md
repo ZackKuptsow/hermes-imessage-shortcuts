@@ -219,7 +219,8 @@ contract is `POST /` with a JSON body of `sender`, `sent_at` and `text` and the 
 | `imessage-shortcuts/` | the plugin: `adapter.py` (the loopback listener, `POST /imessage` for texts and `POST /imessage/send` for a text out without the model, each `204` saying why in `X-Imessage-Dropped`, and the replies), `handles.py` (canonical handles and the allow list), `allowed_toolsets.py` (the closed list of toolsets a text may reach), `inbound.py` (the request's shape), `imsg.py` (finding and calling imsg), `household.py` and `tools.py` (the optional forward), `registration.py`, `plugin.yaml` |
 | `bin/imessage-reply` | sends one iMessage, only to a handle on the allow list; a check that imsg works |
 | `bin/household-forward` | forwards one command from a terminal; prints only whether the answer was delivered |
-| `tests/` | the plugin's and the scripts' tests |
+| `n8n/` | n8n as its own macOS user under a LaunchDaemon, for the relay to come: `install.sh`, `watch-egress.sh`, the plist in `launchd/`, and its own `README.md` |
+| `tests/` | the plugin's and the scripts' tests, and `test_n8n_launchd.py`, which holds the n8n plist to the design |
 
 ## Tests
 
@@ -230,7 +231,7 @@ python3 -m unittest discover -s tests -p 'test_*.py'
 ```
 
 The adapter's suite needs Hermes's own environment (`gateway`, `aiohttp`) and skips without
-it. The full run, 128 tests, is:
+it. The full run, 139 tests, is:
 
 ```sh
 IMESSAGE_SHORTCUTS_TESTS_REQUIRE_HERMES=1 hermes --run-module unittest discover -s tests -p 'test_*.py'
