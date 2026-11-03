@@ -25,9 +25,10 @@ Three runs of one script and a watch beside it. The order matters: downloading n
 `_n8n`'s one outbound connection, and the watch has to be running for n8n's first start,
 which is when it would first call home.
 
-1. `sudo n8n/install.sh` makes the `_n8n` group and user (GID and UID 450), `/var/n8n`, and
-   installs the pinned n8n as `_n8n`. It writes the LaunchDaemon, then stops with exit 4
-   before starting it, saying the egress watch is not running.
+1. `sudo n8n/install.sh` makes the `_n8n` group and user (GID and UID 450, no password,
+   home `/var/n8n`), checks that `_n8n` cannot list your home, makes `/var/n8n`, and installs
+   the pinned n8n as `_n8n`. It writes the LaunchDaemon, then stops with exit 4 before
+   starting it, saying the egress watch is not running.
 2. In a terminal of its own: `sudo n8n/watch-egress.sh`. Leave it a day.
 3. `sudo n8n/install.sh` again starts the daemon, waits for n8n's health check, and stops it
    again if anything of `_n8n` listens beyond `127.0.0.1`.
@@ -38,8 +39,14 @@ which is when it would first call home.
    here records either.
 
 `install.sh` refuses, without changing anything, when what it finds is not its own: a `_n8n`
-with another UID, UID 450 held by another name, `/var/n8n` owned by someone else, or another
-user on port 5678 or 5679. Its exit codes: 3 refused, 4 waiting for the watch, 5 n8n did not
+whose record differs (another UID, shell or home, or a password), UID 450 held by another
+name, `/var/n8n` owned by someone else, or another user on port 5678 or 5679. It also refuses
+to go on while `_n8n` can list your home.
+
+The account is made with `dscl`, the way macOS makes its own daemon accounts, not with
+`sysadminctl -roleAccount`: that ignores `-home` (it sets `/var/empty`), gives the account a
+password, and makes one macOS counts in the `staff` group, which can enter a home at its
+default mode, 750. Its exit codes: 3 refused, 4 waiting for the watch, 5 n8n did not
 answer its health check (read the logs below).
 
 | Path | What it is |

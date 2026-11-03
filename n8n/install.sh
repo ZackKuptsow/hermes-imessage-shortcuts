@@ -5,8 +5,9 @@
 # In order, stopping at the first refusal:
 #   1. refuses unless it runs as root, on the Mac Studio, with Homebrew's node where the
 #      plist starts it and new enough for n8n;
-#   2. makes the `_n8n` group and user, GID and UID 450, or refuses one that exists with
-#      another ID, or the ID held by another name;
+#   2. makes the `_n8n` group and user, GID and UID 450, with no password and its home at
+#      /var/n8n, or refuses one that exists otherwise, or the ID held by another name; then
+#      refuses if `_n8n` can list the home of whoever ran this;
 #   3. makes /var/n8n, its log directory and its data directory, and sets the owner, group
 #      and mode of those three directories alone, never of anything in them: /var/n8n/.n8n
 #      holds the encryption key and the database. Refuses one that someone else owns;
@@ -50,6 +51,11 @@ N8N_DATA_DIRECTORY="${N8N_HOME}/.n8n"
 N8N_NPM_PREFIX="${N8N_HOME}/npm"
 N8N_NPM_CACHE="${N8N_HOME}/.npm"
 N8N_PACKAGE_JSON="${N8N_NPM_PREFIX}/lib/node_modules/n8n/package.json"
+# The account's record, attribute by attribute, as made and as read back on every run. A
+# Password of `*` is no password at all: nothing can log in as `_n8n`. No value may hold a
+# space: dscl prints such a value on a line of its own, which directory_record cannot read.
+USER_ATTRIBUTE_NAMES=(UniqueID PrimaryGroupID UserShell NFSHomeDirectory Password RealName)
+USER_ATTRIBUTE_VALUES=("$N8N_UID" "$N8N_GID" /usr/bin/false "$N8N_HOME" '*' n8n)
 LOG_FILES=("${N8N_LOG_DIRECTORY}/n8n.log" "${N8N_LOG_DIRECTORY}/launchd.out.log" "${N8N_LOG_DIRECTORY}/launchd.err.log")
 HOME_MODE=750
 LOG_DIRECTORY_MODE=750
@@ -112,6 +118,8 @@ holder_of() {
 check_machine() {
   local host_name node_major
   [[ "$EUID" -eq 0 ]] || refuse "run this with sudo: it makes a user and a LaunchDaemon"
+  [[ -n "${SUDO_USER:-}" && "$SUDO_USER" != "$ROOT_USER" ]] \
+    || refuse "run this with sudo from your own account: it checks that ${N8N_USER} cannot read your home"
   host_name="$(hostname -s)"
   [[ "$host_name" == "$MAC_STUDIO_HOST_NAME" ]] \
     || refuse "this is for the Mac Studio (${MAC_STUDIO_HOST_NAME}) alone; this machine is ${host_name}"
@@ -136,23 +144,50 @@ ensure_group() {
   changed "made the group ${N8N_GROUP} (GID ${N8N_GID})"
 }
 
+# check_user_record: every attribute the account is made with, read back; refuses the first
+# that differs, naming how to start again while nothing depends on the record.
+check_user_record() {
+  local attribute expected actual
+  for attribute in "${!USER_ATTRIBUTE_NAMES[@]}"; do
+    expected="${USER_ATTRIBUTE_VALUES[$attribute]}"
+    actual="$(directory_record "/Users/${N8N_USER}" "${USER_ATTRIBUTE_NAMES[$attribute]}")"
+    [[ "$actual" == "$expected" ]] || refuse "user ${N8N_USER} has ${USER_ATTRIBUTE_NAMES[$attribute]}" \
+      "'${actual}', not '${expected}'. Before n8n's first start, 'sudo dscl . -delete /Users/${N8N_USER}'" \
+      "removes the record alone, and this script makes it again"
+  done
+}
+
+# The account is made with dscl, the way macOS makes its own daemon accounts: sysadminctl's
+# -roleAccount ignores -home (it set /var/empty), sets a password, and makes an account
+# opendirectoryd counts in staff, which can enter Zack's home (measured 2026-11-03).
 ensure_user() {
-  local existing_uid existing_gid holder
-  existing_uid="$(directory_record "/Users/${N8N_USER}" UniqueID)"
-  if [[ -n "$existing_uid" ]]; then
-    existing_gid="$(directory_record "/Users/${N8N_USER}" PrimaryGroupID)"
-    [[ "$existing_uid" == "$N8N_UID" ]] || refuse "user ${N8N_USER} exists with UID ${existing_uid}, not ${N8N_UID}"
-    [[ "$existing_gid" == "$N8N_GID" ]] || refuse "user ${N8N_USER} has primary GID ${existing_gid}, not ${N8N_GID}"
+  local holder attribute
+  if [[ -n "$(directory_record "/Users/${N8N_USER}" UniqueID)" ]]; then
+    check_user_record
     return 0
   fi
   holder="$(holder_of /Users UniqueID "$N8N_UID")"
   [[ -z "$holder" ]] || refuse "UID ${N8N_UID} belongs to the user ${holder}"
-  # sysadminctl can report a failure and still exit 0, so the record is read back instead.
-  sysadminctl -addUser "$N8N_USER" -roleAccount -UID "$N8N_UID" -GID "$N8N_GID" \
-    -shell /usr/bin/false -home "$N8N_HOME"
-  [[ "$(directory_record "/Users/${N8N_USER}" UniqueID)" == "$N8N_UID" ]] \
-    || refuse "sysadminctl did not make ${N8N_USER} (its output is above)"
-  changed "made the role account ${N8N_USER} (UID ${N8N_UID}), home ${N8N_HOME}"
+  dscl . -create "/Users/${N8N_USER}" || refuse "dscl could not make ${N8N_USER}"
+  for attribute in "${!USER_ATTRIBUTE_NAMES[@]}"; do
+    dscl . -create "/Users/${N8N_USER}" "${USER_ATTRIBUTE_NAMES[$attribute]}" "${USER_ATTRIBUTE_VALUES[$attribute]}" \
+      || refuse "dscl could not set ${USER_ATTRIBUTE_NAMES[$attribute]} on ${N8N_USER}"
+  done
+  # A record made under a name just deleted can be answered from the old one's cached groups.
+  dsmemberutil flushcache
+  check_user_record
+  changed "made the role account ${N8N_USER} (UID ${N8N_UID}), home ${N8N_HOME}, no password"
+}
+
+# check_isolation: fails closed before n8n runs as a user that can enter Zack's home. The probe
+# is the gate itself, not one cause of it, so it also catches a widened home or a new group.
+check_isolation() {
+  local home
+  home="$(directory_record "/Users/${SUDO_USER}" NFSHomeDirectory)"
+  [[ -d "$home" ]] || refuse "cannot find the home of ${SUDO_USER}"
+  if sudo -u "$N8N_USER" /bin/ls "$home" >/dev/null 2>&1; then
+    refuse "${N8N_USER} can list ${home}, so n8n could read your files; its groups are $(id -Gn "$N8N_USER")"
+  fi
 }
 
 # ensure_directory <path> <owner> <group> <mode>: the directory itself, never its contents.
@@ -319,6 +354,7 @@ main() {
   check_machine
   ensure_group
   ensure_user
+  check_isolation
   ensure_directory "$N8N_HOME" "$N8N_USER" "$ADMIN_GROUP" "$HOME_MODE"
   ensure_directory "$N8N_LOG_DIRECTORY" "$N8N_USER" "$ADMIN_GROUP" "$LOG_DIRECTORY_MODE"
   ensure_directory "$N8N_DATA_DIRECTORY" "$N8N_USER" "$N8N_GROUP" "$DATA_DIRECTORY_MODE"

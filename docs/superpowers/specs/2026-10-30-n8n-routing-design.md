@@ -478,5 +478,5 @@ Each is a test in a ticket, not a lookup.
 | What is Shortcuts' timeout on Get Contents of URL? | moot with Respond Immediately; confirmed by the first real text's timing |
 | Does the plugin's loopback check see n8n's requests as `127.0.0.1`? | phase 2; `::1` is also accepted |
 | Does n8n make any outbound connection with the plist's switches off? | `nettop` or `lsof -i` for a day after first start, phase 1; the pf anchor's counters afterwards |
-| Does `sysadminctl`'s role account take `/var/n8n` as a writable home, and does `sudo -u _n8n n8n import:workflow` see the daemon's user folder? | phase 1 and phase 2 |
+| Does `sysadminctl`'s role account take `/var/n8n` as a writable home, and does `sudo -u _n8n n8n import:workflow` see the daemon's user folder? | phase 1 and phase 2. The first half, answered 2026-11-03: no. `-roleAccount` set the home to `/var/empty`, gave the account a password, and made one counted in `staff`, which can enter a home at mode 750; `n8n/install.sh` makes the account with `dscl` instead |
 | Does the pf anchor's line survive a macOS point update, and does the loader restore it? | after the first update that lands; the loader is written to re-add it regardless |
