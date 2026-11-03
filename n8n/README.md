@@ -17,7 +17,11 @@ Docker unchanged when the 2.x window closes.
 - Homebrew's `node`, at `/opt/homebrew/bin/node`, version 24 or later (n8n 2.45 asks for
   `>=24.0.0`; written against 26.10.0). A `brew upgrade node` restarts nothing by itself,
   but the next start of n8n runs on the new Node.
-- About 3 GB of headroom on the author's Mac with the model loaded.
+- About 3 GB of headroom on the author's Mac with the model loaded. n8n takes a sixth of it:
+  measured there on 2026-11-03 with the model loaded, n8n's two processes (`n8n start` and
+  `n8n task-runner` in `ps -o rss=,comm= -u _n8n`) held about 480 MB resident just after
+  the editor was used, a footprint of about 395 MB (Activity Monitor's Memory column, `top`'s
+  `MEM`), and about 210 MB resident after three idle hours, once macOS had compressed the rest.
 
 ## Install
 
@@ -34,9 +38,10 @@ which is when it would first call home.
    again if anything of `_n8n` listens beyond `127.0.0.1`.
 4. `sudo n8n/install.sh` a third time says `nothing to do`. Any later run that finds
    everything in place says the same and changes nothing.
-5. **The owner account**, once, in Safari at `http://127.0.0.1:5678`, before any workflow is
-   imported: your own email address, and a password kept in your password manager. Nothing
-   here records either.
+5. **The owner account**, once, in a browser on the Mac at `http://127.0.0.1:5678`, before
+   any workflow is imported: your own email address, and a password kept in your password
+   manager, not the browser's. Nothing here records either. Skip any offer of free paid
+   features: it sends your email address to n8n.
 
 `install.sh` refuses, without changing anything, when what it finds is not its own: a `_n8n`
 whose record differs (another UID, shell or home, or a password), UID 450 held by another
