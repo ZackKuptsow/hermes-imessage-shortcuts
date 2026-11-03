@@ -14,7 +14,8 @@ from pathlib import Path
 
 ALLOW_LIST_RELATIVE_PATH = Path("data/imessage/zack-handles.txt")  # under the Hermes home
 COMMENT_PREFIX = "#"
-EMAIL_PATTERN = re.compile(r"^[^@\s-][^@\s]*@[^@\s]+\.[^@\s]+$")
+# \x00 is excluded with the whitespace: no argument can carry it, so imsg could not be handed it.
+EMAIL_PATTERN = re.compile(r"^[^@\s\x00-][^@\s\x00]*@[^@\s\x00]+\.[^@\s\x00]+$")
 E164_PATTERN = re.compile(r"^\+[1-9][0-9]{6,14}$")
 PHONE_PUNCTUATION_PATTERN = re.compile(r"[\s().\-\u00a0]")
 PROFILES_DIRECTORY = "profiles"

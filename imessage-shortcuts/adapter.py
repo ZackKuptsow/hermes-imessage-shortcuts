@@ -348,8 +348,9 @@ class ImessageShortcutsAdapter(BasePlatformAdapter):
     async def _handle_send(self, request: web.Request) -> web.Response:
         """Send one text for a loopback caller with the secret, to a handle on the allow list.
 
-        403, 503 and 401 as the ingress answers them, and 400 when malformed or when there is
-        no text: the caller composed it, so an empty one is the caller's bug, which a 204
+        403, 503 and 401 as the ingress answers them, and 400 when malformed, when there is
+        no text, or when the text holds a character imsg cannot be handed (a NUL or a lone
+        surrogate): the caller composed it, so either is the caller's bug, which a 204
         would pass off as success. A 204 with X-Imessage-Dropped `sender` for a recipient off
         the allow list. 202 when imsg reported `sent`; 502 when it did not, with imsg's
         disposition in a JSON body. No session, no duplicate check and no toolset check:
@@ -368,8 +369,8 @@ class ImessageShortcutsAdapter(BasePlatformAdapter):
         sent = await self._send_text(settings, send_request.to, send_request.text)
         if isinstance(sent.refusal, imsg.RecipientRefusedError):
             return dropped_response(DropReason.SENDER)
-        if isinstance(sent.refusal, imsg.EmptyTextRefusedError):
-            logger.warning(f"{LOG_PREFIX} refused a send request: there is no text to send")
+        if isinstance(sent.refusal, (imsg.EmptyTextRefusedError, imsg.UnsendableTextRefusedError)):
+            logger.warning(f"{LOG_PREFIX} refused a send request: its text cannot be sent")
             return web.Response(status=400)
         if not sent.result.success:
             return web.json_response({"disposition": sent.disposition or imsg.DISPOSITION_UNKNOWN}, status=502)
@@ -387,10 +388,17 @@ class ImessageShortcutsAdapter(BasePlatformAdapter):
     async def _send_text(self, settings: StartupSettings, handle: str, content: str) -> TextSent:
         """Send *content* to *handle* as plain text, chunked, each chunk through imsg off the event loop.
 
-        The adapter's one way out, for a reply and the send endpoint alike. imsg.send_message
-        refuses a handle off the allow list and an empty text; the first chunk that fails
-        stops the rest.
+        The adapter's one way out, for a reply and the send endpoint alike. The whole text
+        passes imsg's refusals before it is split (a handle off the allow list, an empty text,
+        a character imsg cannot be handed), so no refusal arrives after a chunk went out; the
+        first chunk that fails stops the rest.
         """
+        text = self.format_message(content)
+        try:
+            imsg.check_send(text, handle, settings.allowed)
+        except imsg.SendRefusedError as error:
+            logger.error(f"{LOG_PREFIX} {error}")
+            return TextSent(result=SendResult(success=False, error=str(error)), refusal=error)
         disposition: str | None = None
         refusal: imsg.SendRefusedError | None = None
 
@@ -409,7 +417,7 @@ class ImessageShortcutsAdapter(BasePlatformAdapter):
             disposition = outcome.disposition
             return SendResult(success=False, error=f"imsg did not send: {outcome.disposition}")
 
-        chunks = self.truncate_message(self.format_message(content), self.MAX_MESSAGE_LENGTH)
+        chunks = self.truncate_message(text, self.MAX_MESSAGE_LENGTH)
         result = await send_chunks(chunks, send_one)
         return TextSent(result=result, disposition=disposition, refusal=refusal)
 

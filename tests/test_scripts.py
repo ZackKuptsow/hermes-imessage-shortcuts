@@ -91,6 +91,14 @@ class ImessageReplyTest(ScriptTest):
         completed = self.run_script("imessage-reply", "from another profile")
         self.assertEqual((completed.returncode, self.imsg_calls()[0][1]), (0, f"--to={ZACK_PHONE}"))
 
+    def test_a_text_holding_a_nul_on_standard_input_is_refused_without_quoting_it(self):
+        # Standard input is the one way a NUL reaches the script: an argument cannot carry one.
+        self.allow(ZACK_PHONE)
+        completed = self.run_script("imessage-reply", "-", stdin="before\x00after")
+        self.assertEqual((completed.returncode, self.imsg_calls()), (2, []))
+        self.assertIn("not sent", completed.stderr)
+        self.assertNotIn("before", completed.stdout + completed.stderr)
+
     def test_the_roots_own_list_is_never_read(self):
         (self.root / "data/imessage").mkdir(parents=True)
         (self.root / "data/imessage/zack-handles.txt").write_text(f"{PARTNER_PHONE}\n")
@@ -181,6 +189,7 @@ class HouseholdForwardExitCodeTest(ScriptTest):
             ("a refusal", function_answering(403), RecordingRun(), 1),
             ("an answer whose send failed", function_answering(200, HOUSEHOLD_ANSWER),
              RecordingRun(stdout=IMSG_NOT_STARTED, returncode=1), 1),
+            ("an answer imsg cannot be handed", function_answering(200, f"{HOUSEHOLD_ANSWER}\x00"), RecordingRun(), 1),
             ("no answer at all: the function is unreachable", function_unreachable, RecordingRun(), 1),
         )
         for case, opener, imsg_run, expected_exit_code in cases:
@@ -188,6 +197,7 @@ class HouseholdForwardExitCodeTest(ScriptTest):
                 exit_code, printed = self.run_main(opener, imsg_run)
                 self.assertEqual(exit_code, expected_exit_code)
                 self.assertNotIn("oat milk", printed)
+                self.assertNotIn("\x00", printed)
 
 
 if __name__ == "__main__":

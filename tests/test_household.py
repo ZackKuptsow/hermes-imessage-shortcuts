@@ -117,6 +117,15 @@ class ForwardTest(unittest.TestCase):
         self.assertIn("may_have_completed", outcome.summary)
         self.assertNotIn("oat milk", outcome.summary)
 
+    def test_an_answer_imsg_cannot_be_handed_sends_nothing_and_says_so_without_the_answer(self):
+        # The answer is decoded as strict UTF-8, so a NUL is the one such character that reaches it.
+        StubFunction.answer_body = f"{ANSWER}\x00"
+        outcome = self.forward()
+        self.assertEqual((outcome.delivered, outcome.nothing_to_send, outcome.status, self.imsg_run.calls),
+                         (False, False, 200, []))
+        self.assertIn("cannot be sent", outcome.summary)
+        self.assertNotIn("oat milk", outcome.summary)
+
     def test_an_unreachable_function_is_reported_without_its_url(self):
         def refuse(request, timeout):
             raise urllib.error.URLError("connection refused to function.example.invalid")
