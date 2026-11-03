@@ -52,6 +52,7 @@ DESIGNED_ENVIRONMENT = {
     "N8N_PUBLIC_API_DISABLED": "true",
     "N8N_PYTHON_ENABLED": "false",
     "N8N_RESTRICT_FILE_ACCESS_TO": "/var/n8n/.n8n",
+    "N8N_RUNNERS_BROKER_LISTEN_ADDRESS": "127.0.0.1",
     "N8N_SECURE_COOKIE": "false",
     "N8N_SSRF_ALLOWED_IP_RANGES": "127.0.0.1/32",
     "N8N_SSRF_PROTECTION_ENABLED": "true",
@@ -85,6 +86,12 @@ RELAY_SECRET_EXAMPLE = "0123456789abcdef" * 4  # the X-Relay-Secret's shape: 64 
 # Hex and URL-safe base64 match whole. The slash is left out so a path never matches, which
 # means a standard base64 secret is caught only when a run between its slashes is that long.
 SECRET_PATTERN = re.compile(rf"[A-Za-z0-9+=_-]{{{inbound.SECRET_MINIMUM_LENGTH},}}")
+# The design's own names are exempt from the rule on names: N8N_VERSION_NOTIFICATIONS_ENABLED
+# alone is a run of 33 token characters.
+DESIGNED_NAMES = frozenset({*DESIGNED_ENVIRONMENT, *DESIGNED_KEYS, ENVIRONMENT_KEY, *FORBIDDEN_VARIABLES})
+# plistlib drops comments, so they are read from the file's text.
+COMMENT_PATTERN = re.compile(r"<!--(.*?)-->", re.DOTALL)
+WORD_PUNCTUATION = ".,;:()[]<>\"'"
 UNDESIGNED_ROW = ("N8N_GRACEFUL_SHUTDOWN_TIMEOUT", "30")
 
 
@@ -121,6 +128,39 @@ def every_string(node: object, location: str = "") -> list[tuple[str, str]]:
     return []
 
 
+def every_undesigned_name(node: object, location: str = "") -> list[tuple[str, str]]:
+    """Each dict key in a parsed plist that the design does not give, with the path to its dict."""
+    if isinstance(node, dict):
+        return [*((location, key) for key in node if key not in DESIGNED_NAMES),
+                *(found for key, child in node.items() for found in every_undesigned_name(child, f"{location}/{key}"))]
+    if isinstance(node, list):
+        return [found for index, child in enumerate(node)
+                for found in every_undesigned_name(child, f"{location}[{index}]")]
+    return []
+
+
+def every_data(node: object, location: str = "") -> list[str]:
+    """The path to each <data> value in a parsed plist, which plistlib reads as bytes."""
+    if isinstance(node, bytes):
+        return [location]
+    if isinstance(node, dict):
+        return [found for key, child in node.items() for found in every_data(child, f"{location}/{key}")]
+    if isinstance(node, list):
+        return [found for index, child in enumerate(node) for found in every_data(child, f"{location}[{index}]")]
+    return []
+
+
+def comment_problems(text: str) -> list[str]:
+    """Each comment in a plist's text holding a word that reads as a secret or a handle.
+
+    A word is a run between spaces, trimmed of punctuation, so a phone number written with
+    spaces inside it is not seen; the plist's one comment holds no number at all.
+    """
+    return [f"comment {number} looks like it holds a secret or a handle"
+            for number, comment in enumerate(COMMENT_PATTERN.findall(text), start=1)
+            if any(looks_like_secret_or_handle(word.strip(WORD_PUNCTUATION)) for word in comment.split())]
+
+
 def plist_problems(daemon: dict) -> list[str]:
     """Every way *daemon* departs from the design, one line each, empty when it matches.
 
@@ -142,6 +182,9 @@ def plist_problems(daemon: dict) -> list[str]:
     problems.extend(f"{ENVIRONMENT_KEY}/{name} must be absent" for name in FORBIDDEN_VARIABLES if name in environment)
     problems.extend(f"{location} looks like a secret or a handle"
                     for location, value in every_string(daemon) if looks_like_secret_or_handle(value))
+    problems.extend(f"{location or 'the top level'} has a name that looks like a secret or a handle"
+                    for location, name in every_undesigned_name(daemon) if looks_like_secret_or_handle(name))
+    problems.extend(f"{location} is data, which the design never holds" for location in every_data(daemon))
     return problems
 
 
@@ -153,6 +196,11 @@ def repository_plist() -> dict:
 class RepositoryPlistTest(unittest.TestCase):
     def test_the_repository_plist_matches_the_design(self):
         self.assertEqual(plist_problems(repository_plist()), [])
+
+    def test_the_repository_plists_comments_hold_no_secret_or_handle(self):
+        text = PLIST_PATH.read_text(encoding="utf-8")
+        self.assertTrue(COMMENT_PATTERN.findall(text), "the plist's comment, which this reads, is gone")
+        self.assertEqual(comment_problems(text), [])
 
     def test_the_file_is_named_for_its_label(self):
         # launchd refuses a daemon whose file name and Label disagree.
@@ -227,6 +275,28 @@ class PlistRuleTest(unittest.TestCase):
                     hits = [problem for problem in problems if problem.endswith("looks like a secret or a handle")]
                     self.assertEqual(len(hits), 1, problems)
                     self.assertNotIn(value, " ".join(problems))
+
+    def test_a_secret_or_a_handle_as_a_name_the_design_does_not_give_is_named_without_it(self):
+        for value in (RELAY_SECRET_EXAMPLE, ZACK_PHONE, ZACK_EMAIL):
+            with self.subTest(value=value):
+                problems = self.broken(lambda daemon, value=value: daemon[ENVIRONMENT_KEY].update({value: "1"}))
+                self.assert_one_problem_naming(problems, ENVIRONMENT_KEY)
+                self.assertNotIn(value, " ".join(problems))
+
+    def test_data_anywhere_is_named(self):
+        # plistlib reads <data> as bytes, which no rule on strings can see into.
+        problems = self.broken(lambda daemon: daemon.update({"Payload": RELAY_SECRET_EXAMPLE.encode()}))
+        self.assert_one_problem_naming(problems, "Payload")
+
+    def test_a_secret_or_a_handle_in_a_comment_is_named_without_its_value(self):
+        text = PLIST_PATH.read_text(encoding="utf-8")
+        for value in (RELAY_SECRET_EXAMPLE, ZACK_PHONE, ZACK_EMAIL):
+            with self.subTest(value=value):
+                # A comma: canonical_handle refuses a number with one, so the word must be trimmed.
+                comment = f"<!-- the relay's is {value}, for now -->\n<dict>"
+                problems = comment_problems(text.replace("<dict>", comment, 1))
+                self.assertEqual(len(problems), 1, problems)
+                self.assertNotIn(value, " ".join(problems))
 
     def test_a_row_the_design_does_not_name_is_allowed(self):
         name, value = UNDESIGNED_ROW

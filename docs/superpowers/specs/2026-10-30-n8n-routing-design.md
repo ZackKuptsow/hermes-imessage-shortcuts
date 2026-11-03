@@ -268,6 +268,7 @@ launchd ignores `.env` files:
 |---|---|---|
 | `N8N_LISTEN_ADDRESS` | `127.0.0.1` | default is every interface |
 | `N8N_PORT` | `5678` | |
+| `N8N_RUNNERS_BROKER_LISTEN_ADDRESS` | `127.0.0.1` | already the task broker's default in 2.45 (`runners.config.js` in `@n8n/config`); pinned so an upgrade that widens it cannot, and so the test fails on a row that does (added 2026-11-03 from the branch review) |
 | `N8N_HOST`, `N8N_EDITOR_BASE_URL`, `N8N_WEBHOOK_URL` | `127.0.0.1`, `http://127.0.0.1:5678/` | `WEBHOOK_URL` is deprecated since 2.35 |
 | `N8N_SECURE_COOKIE` | `false` | WebKit refuses Secure cookies over plain http on localhost |
 | `N8N_PROTOCOL` | `http` | plain http on the loopback interface |
