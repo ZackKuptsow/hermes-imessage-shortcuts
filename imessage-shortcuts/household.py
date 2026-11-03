@@ -154,7 +154,15 @@ def forward_household_command(
     if status != HTTPStatus.OK:
         return ForwardOutcome(delivered=False, status=status,
                               summary=f"The household assistant refused the message with HTTP {status}.")
-    sent = imsg.send_message(answer, zack, allowed, settings.imsg_path, run=run)
+    try:
+        sent = imsg.send_message(answer, zack, allowed, settings.imsg_path, run=run)
+    except imsg.UnsendableTextRefusedError:
+        # The other refusals cannot happen here (the recipient comes from the allow list, and a
+        # blank answer returned above), so one that ever did should still fail loudly.
+        return ForwardOutcome(
+            delivered=False, status=status,
+            summary="The household assistant answered, but its answer holds a character that cannot be sent "
+                    "(a NUL), so nothing was sent.")
     if sent.delivered:
         return ForwardOutcome(delivered=True, status=status,
                               summary="The household assistant answered, and its answer was sent to Zack's phone.")

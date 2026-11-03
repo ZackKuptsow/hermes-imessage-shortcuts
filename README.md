@@ -65,8 +65,10 @@ first (`403` off the loopback address, `503` while the platform is not serving, 
 without the secret), then `400` for a malformed body. The text leaves the way a reply does,
 through gate 3: a recipient off the allow list is a `204` with `X-Imessage-Dropped: sender`,
 and an empty text is a `400`, since the caller composed it and a `204` would read as
-success; imsg never runs for either. `202` means imsg reported `sent`. `502` means it did
-not, with imsg's word for why in a JSON body,
+success. So is a text holding a character no command-line argument can carry, a NUL or a
+lone surrogate: it is refused whole, before any of a long text goes out, and never sent
+altered. imsg never runs for any of these. `202` means imsg reported `sent`. `502` means
+it did not, with imsg's word for why in a JSON body,
 `{"disposition": "not_started"}`, and never the text. It opens no session and checks no
 toolsets: no text reaches it, and the model has no tool that calls it. So while a widened
 profile has every text answered `503`, the alarm about it still goes out, until the
@@ -222,7 +224,7 @@ python3 -m unittest discover -s tests -p 'test_*.py'
 ```
 
 The adapter's suite needs Hermes's own environment (`gateway`, `aiohttp`) and skips without
-it. The full run, 119 tests, is:
+it. The full run, 126 tests, is:
 
 ```sh
 IMESSAGE_SHORTCUTS_TESTS_REQUIRE_HERMES=1 hermes --run-module unittest discover -s tests -p 'test_*.py'

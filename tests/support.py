@@ -51,7 +51,11 @@ def hermes_is_required() -> bool:
 
 
 class RecordingRun:
-    """Stands in for `subprocess.run`: records each argument vector and answers as told."""
+    """Stands in for `subprocess.run`: records each argument vector and answers as told.
+
+    Like the real one, it raises ValueError, recording nothing, for an argument the operating
+    system cannot be handed: one holding U+0000, or one `os.fsencode` cannot encode.
+    """
 
     def __init__(self, stdout: str = '{"status":"sent"}', returncode: int = 0, raises: BaseException | None = None):
         self.calls: list[list[str]] = []
@@ -60,6 +64,10 @@ class RecordingRun:
         self.stdout = stdout
 
     def __call__(self, arguments: list[str], **_: object) -> subprocess.CompletedProcess[str]:
+        for argument in arguments:
+            if "\x00" in argument:
+                raise ValueError("embedded null byte")
+            os.fsencode(argument)  # UnicodeEncodeError, a ValueError, as subprocess raises it
         self.calls.append(list(arguments))
         if self.raises is not None:
             raise self.raises

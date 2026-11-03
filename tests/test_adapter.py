@@ -447,6 +447,13 @@ class AdapterTest(unittest.IsolatedAsyncioTestCase):
         self.assertTrue((await adapter.send(ZACK_PHONE, "word " * 1500)).success)
         self.assertGreater(len(self.imsg_calls()), 1)
 
+    async def test_a_reply_imsg_cannot_be_handed_fails_rather_than_raising_and_sends_nothing(self):
+        adapter = await self.start_adapter()
+        for label, text in (("a NUL", "Done.\x00"), ("a lone surrogate", "Done.\ud800"),
+                            ("a NUL past the first chunk", "word " * 1500 + "\x00")):
+            with self.subTest(label):
+                self.assertFalse((await adapter.send(ZACK_PHONE, text)).success)
+        self.assertEqual(self.imsg_calls(), [])
 
     async def test_after_a_refused_reconnect_nothing_is_sent(self):
         adapter = await self.start_adapter()
@@ -489,6 +496,15 @@ class AdapterTest(unittest.IsolatedAsyncioTestCase):
         await self.start_adapter()
         for text in ("", "  \n"):
             with self.subTest(text=text):
+                self.assertEqual((await self.send_request(self.alarm(text=text)))[:2], (400, None))
+        self.assertEqual(self.imsg_calls(), [])
+
+    async def test_a_send_whose_text_imsg_cannot_be_handed_is_a_bad_request_and_imsg_never_runs(self):
+        # The NUL in the long text sits past its first chunk: the whole text is checked before any goes out.
+        await self.start_adapter()
+        for label, text in (("a NUL", f"{ALARM}\x00"), ("a lone surrogate", f"{ALARM}\ud800"),
+                            ("a NUL past the first chunk", "word " * 1500 + "\x00")):
+            with self.subTest(label):
                 self.assertEqual((await self.send_request(self.alarm(text=text)))[:2], (400, None))
         self.assertEqual(self.imsg_calls(), [])
 
@@ -538,11 +554,12 @@ class AdapterTest(unittest.IsolatedAsyncioTestCase):
             statuses = [(await self.send_request(self.alarm(to="+1 (555) 010-0199")))[0],
                         (await self.send_request(self.alarm(to=PARTNER_PHONE)))[0],
                         (await self.send_request(self.alarm(text="  ")))[0],
+                        (await self.send_request(self.alarm(text=f"{ALARM}\x00")))[0],
                         (await self.send_request(None, raw=json.dumps({"to": ZACK_PHONE}).encode()))[0],
                         (await self.send_request(self.alarm(), secret=SECRET[:-1] + "x"))[0]]
             self.fake_imsg_answers(IMSG_NOT_STARTED, exit_code=1)
             statuses.append((await self.send_request(self.alarm()))[0])
-        self.assertEqual(statuses, [202, 204, 400, 400, 401, 502])  # every path that logs was taken
+        self.assertEqual(statuses, [202, 204, 400, 400, 400, 401, 502])  # every path that logs was taken
         for record in logged.records:
             for kept_out in (ALARM, "5550100199", "010-0199", "5550100142", SECRET, SECRET[:-1]):
                 with self.subTest(message=record.getMessage()):

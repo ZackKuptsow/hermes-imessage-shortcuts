@@ -22,13 +22,15 @@ DISPOSITION_SENT = "sent"
 DISPOSITION_TIMED_OUT = "may_have_completed"
 DISPOSITION_UNKNOWN = "unknown"
 IMSG_INSTALL_LOCATIONS = (Path("/opt/homebrew/bin/imsg"), Path("/usr/local/bin/imsg"))
+NUL_CHARACTER = "\x00"
 SEND_TIMEOUT_SECONDS = 60
 SERVICE = "imessage"
 STATUS_SENT = "sent"
+TEXT_ENCODING = "utf-8"
 
 
 class SendRefusedError(Exception):
-    """A send this module will not attempt: a handle off the allow list, or no text."""
+    """A send this module will not attempt: a handle off the allow list, no text, or a text imsg cannot be handed."""
 
 
 class RecipientRefusedError(SendRefusedError):
@@ -37,6 +39,10 @@ class RecipientRefusedError(SendRefusedError):
 
 class EmptyTextRefusedError(SendRefusedError):
     """There is no text to send."""
+
+
+class UnsendableTextRefusedError(SendRefusedError):
+    """The text holds a character no argument can carry: U+0000, or a lone surrogate."""
 
 
 class ImsgMissingError(Exception):
@@ -96,6 +102,49 @@ def read_outcome(completed: subprocess.CompletedProcess[str]) -> SendOutcome:
     return SendOutcome(delivered=False, disposition=disposition)
 
 
+def check_text_can_be_handed(text: str) -> None:
+    """Refuse a text that cannot be passed to imsg as an argument.
+
+    `subprocess.run` raises ValueError for an argument holding U+0000, and for one it cannot
+    encode, such as a lone surrogate. Strict UTF-8 refuses slightly more than it would (it
+    passes U+DC80 to U+DCFF through `surrogateescape`), on purpose: no such text is one
+    Messages can show. The text is refused, never altered, so nothing goes out changed.
+
+    Raises:
+        UnsendableTextRefusedError: the text holds either. The message never holds the text.
+    """
+    if NUL_CHARACTER in text:
+        raise UnsendableTextRefusedError("refusing to send a text holding a NUL character")
+    try:
+        text.encode(TEXT_ENCODING)
+    except UnicodeEncodeError:
+        # Not chained: the encoding error's `object` is the whole text.
+        raise UnsendableTextRefusedError("refusing to send a text holding a lone surrogate") from None
+
+
+def checked_recipient(text: str, handle: str, allowed_handles: tuple[str, ...]) -> str:
+    """The canonical form of *handle*, once a send of *text* to it has passed every refusal.
+
+    A caller that splits a text checks the whole text here first, so a refusal can never
+    arrive after part of it went out.
+
+    Raises:
+        RecipientRefusedError: the handle is not a handle or not on the allow list.
+        EmptyTextRefusedError: the text is empty.
+        UnsendableTextRefusedError: the text cannot be passed to imsg as an argument.
+    """
+    try:
+        recipient = handles.canonical_handle(handle)
+    except handles.InvalidHandleError as error:
+        raise RecipientRefusedError(f"refusing to send: the recipient is {error}") from error
+    if recipient not in allowed_handles:
+        raise RecipientRefusedError("refusing to send to a handle that is not on the allow list")
+    if not text.strip():
+        raise EmptyTextRefusedError("refusing to send an empty message")
+    check_text_can_be_handed(text)
+    return recipient
+
+
 def send_message(
     text: str,
     handle: str,
@@ -106,17 +155,9 @@ def send_message(
     """Send *text* to *handle* when the handle is on *allowed_handles*.
 
     Raises:
-        RecipientRefusedError: the handle is not a handle or not on the allow list.
-        EmptyTextRefusedError: the text is empty. Nothing is sent in either case.
+        SendRefusedError: one of `checked_recipient`'s refusals. Nothing is sent.
     """
-    try:
-        recipient = handles.canonical_handle(handle)
-    except handles.InvalidHandleError as error:
-        raise RecipientRefusedError(f"refusing to send: the recipient is {error}") from error
-    if recipient not in allowed_handles:
-        raise RecipientRefusedError("refusing to send to a handle that is not on the allow list")
-    if not text.strip():
-        raise EmptyTextRefusedError("refusing to send an empty message")
+    recipient = checked_recipient(text, handle, allowed_handles)
     try:
         completed = run(build_send_arguments(imsg_path, recipient, text), capture_output=True, text=True,
                         timeout=SEND_TIMEOUT_SECONDS, check=False)

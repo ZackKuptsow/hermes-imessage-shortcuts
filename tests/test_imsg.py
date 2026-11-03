@@ -44,6 +44,25 @@ class SendMessageRefusalTest(unittest.TestCase):
             imsg.send_message("  \n", ZACK_PHONE, ALLOWED, IMSG_PATH, run=run)
         self.assertEqual(run.calls, [])
 
+    def test_a_text_imsg_cannot_be_handed_is_refused_without_quoting_it_and_imsg_never_runs(self):
+        # subprocess.run raises ValueError for an argument holding either, which no caller
+        # catches; U+DC80 is one subprocess would pass through surrogateescape, refused on purpose.
+        for label, unsendable in (("a NUL", "\x00"), ("a lone high surrogate", "\ud800"),
+                                  ("a lone low surrogate", "\udc80")):
+            with self.subTest(label):
+                run = RecordingRun()
+                with self.assertRaises(imsg.UnsendableTextRefusedError) as raised:
+                    imsg.send_message(f"before{unsendable}after", ZACK_PHONE, ALLOWED, IMSG_PATH, run=run)
+                self.assertEqual(run.calls, [])
+                for kept_out in ("before", "after", "5550100199"):
+                    self.assertNotIn(kept_out, str(raised.exception))
+
+    def test_every_other_character_passes_as_before(self):
+        text = "tab\tbell\x07 emoji \U0001f3e0 accent é joiner ‍"
+        run = RecordingRun()
+        self.assertTrue(imsg.send_message(text, ZACK_PHONE, ALLOWED, IMSG_PATH, run=run).delivered)
+        self.assertEqual(run.option(0, "--text="), text)
+
 
 class SendMessageOutcomeTest(unittest.TestCase):
     def test_sends_to_the_canonical_form_of_an_allowed_handle(self):
