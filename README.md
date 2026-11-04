@@ -227,19 +227,25 @@ contract is `POST /` with a JSON body of `sender`, `sent_at` and `text` and the 
 Most suites run under any Python 3.12 or later:
 
 ```sh
-python3 -m unittest discover -s tests -p 'test_*.py'
+python3 -m unittest discover -s ./tests -p 'test_*.py'
 ```
 
 The adapter's suite needs Hermes's own environment (`gateway`, `aiohttp`) and skips without
 it. The full run, 165 tests, is:
 
 ```sh
-IMESSAGE_SHORTCUTS_TESTS_REQUIRE_HERMES=1 hermes --run-module unittest discover -s tests -p 'test_*.py'
+IMESSAGE_SHORTCUTS_TESTS_REQUIRE_HERMES=1 hermes --run-module unittest discover -s ./tests -p 'test_*.py'
 ```
 
 With that variable set, the adapter's suite runs and never skips, so a run under the wrong
 interpreter fails rather than passing on skipped tests. CI runs both forms on macOS, the
 second after installing Hermes with its own install script.
+
+Run both from the repository's root. Keep the `./` in front of `tests`: it can only mean a
+folder right here, so where there is none the command stops with an error and runs nothing.
+Without it, `unittest` falls back to importing a package named `tests`, and under
+`hermes --run-module` that is Hermes's own suite, run against your real home. The `./` cannot
+help inside `~/.hermes/hermes-agent`, where that folder is Hermes's suite.
 
 Do not run these with `HERMES_HOME` pointed at a temporary directory: Hermes treats it as a
 new data root, builds a runtime there, and re-executes the run under an interpreter without
