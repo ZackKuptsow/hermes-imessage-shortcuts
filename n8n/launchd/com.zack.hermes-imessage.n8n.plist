@@ -1,0 +1,121 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!--
+  n8n as the _n8n role account, on 127.0.0.1 alone, sending nothing off the Mac.
+  install.sh copies this file to /Library/LaunchDaemons unchanged. Every user on the Mac can
+  read it there and anyone can read it on GitHub, so it holds no secret and no handle:
+  n8n writes its encryption key to /var/n8n/.n8n/config on first start.
+  tests/test_n8n_launchd.py holds every value below against the design
+  (docs/superpowers/specs/2026-10-30-n8n-routing-design.md, "Install, service and hardening").
+-->
+<plist version="1.0">
+<dict>
+	<key>EnvironmentVariables</key>
+	<dict>
+		<key>EXECUTIONS_DATA_MAX_AGE</key>
+		<string>168</string>
+		<key>EXECUTIONS_DATA_PRUNE</key>
+		<string>true</string>
+		<key>EXECUTIONS_DATA_SAVE_MANUAL_EXECUTIONS</key>
+		<string>false</string>
+		<key>EXECUTIONS_DATA_SAVE_ON_ERROR</key>
+		<string>none</string>
+		<key>EXECUTIONS_DATA_SAVE_ON_PROGRESS</key>
+		<string>false</string>
+		<key>EXECUTIONS_DATA_SAVE_ON_SUCCESS</key>
+		<string>none</string>
+		<key>EXTERNAL_FRONTEND_HOOKS_URLS</key>
+		<string></string>
+		<key>HOME</key>
+		<string>/var/n8n</string>
+		<key>N8N_BLOCK_ENV_ACCESS_IN_NODE</key>
+		<string>true</string>
+		<key>N8N_COMMUNITY_PACKAGES_ENABLED</key>
+		<string>false</string>
+		<key>N8N_DIAGNOSTICS_CONFIG_BACKEND</key>
+		<string></string>
+		<key>N8N_DIAGNOSTICS_CONFIG_FRONTEND</key>
+		<string></string>
+		<key>N8N_DIAGNOSTICS_ENABLED</key>
+		<string>false</string>
+		<key>N8N_DISABLED_MODULES</key>
+		<string>insights</string>
+		<key>N8N_EDITOR_BASE_URL</key>
+		<string>http://127.0.0.1:5678/</string>
+		<key>N8N_HOST</key>
+		<string>127.0.0.1</string>
+		<key>N8N_LICENSE_AUTO_RENEW_ENABLED</key>
+		<string>false</string>
+		<key>N8N_LICENSE_SERVER_URL</key>
+		<string>http://127.0.0.1:9/</string>
+		<key>N8N_LISTEN_ADDRESS</key>
+		<string>127.0.0.1</string>
+		<key>N8N_LOG_FILE_LOCATION</key>
+		<string>/var/n8n/log/n8n.log</string>
+		<key>N8N_LOG_LEVEL</key>
+		<string>info</string>
+		<key>N8N_LOG_OUTPUT</key>
+		<string>file</string>
+		<key>N8N_PERSONALIZATION_ENABLED</key>
+		<string>false</string>
+		<key>N8N_PORT</key>
+		<string>5678</string>
+		<key>N8N_PROTOCOL</key>
+		<string>http</string>
+		<key>N8N_PUBLIC_API_DISABLED</key>
+		<string>true</string>
+		<key>N8N_PYTHON_ENABLED</key>
+		<string>false</string>
+		<key>N8N_RESTRICT_FILE_ACCESS_TO</key>
+		<string>/var/n8n/.n8n</string>
+		<key>N8N_RUNNERS_BROKER_LISTEN_ADDRESS</key>
+		<string>127.0.0.1</string>
+		<key>N8N_SECURE_COOKIE</key>
+		<string>false</string>
+		<key>N8N_SSRF_ALLOWED_IP_RANGES</key>
+		<string>127.0.0.1/32</string>
+		<key>N8N_SSRF_PROTECTION_ENABLED</key>
+		<string>true</string>
+		<key>N8N_TEMPLATES_ENABLED</key>
+		<string>false</string>
+		<key>N8N_USER_FOLDER</key>
+		<string>/var/n8n</string>
+		<key>N8N_VERSION_NOTIFICATIONS_ENABLED</key>
+		<string>false</string>
+		<key>N8N_WEBHOOK_URL</key>
+		<string>http://127.0.0.1:5678/</string>
+		<key>NODE_OPTIONS</key>
+		<string>--max-old-space-size=512</string>
+		<key>PATH</key>
+		<string>/usr/bin:/bin:/usr/sbin:/sbin:/opt/homebrew/bin</string>
+	</dict>
+	<key>GroupName</key>
+	<string>_n8n</string>
+	<key>KeepAlive</key>
+	<true/>
+	<key>Label</key>
+	<string>com.zack.hermes-imessage.n8n</string>
+	<key>ProcessType</key>
+	<string>Background</string>
+	<key>ProgramArguments</key>
+	<array>
+		<string>/opt/homebrew/bin/node</string>
+		<string>/var/n8n/npm/lib/node_modules/n8n/bin/n8n</string>
+		<string>start</string>
+	</array>
+	<key>RunAtLoad</key>
+	<true/>
+	<key>StandardErrorPath</key>
+	<string>/var/n8n/log/launchd.err.log</string>
+	<key>StandardOutPath</key>
+	<string>/var/n8n/log/launchd.out.log</string>
+	<key>ThrottleInterval</key>
+	<integer>30</integer>
+	<key>Umask</key>
+	<string>027</string>
+	<key>UserName</key>
+	<string>_n8n</string>
+	<key>WorkingDirectory</key>
+	<string>/var/n8n</string>
+</dict>
+</plist>
