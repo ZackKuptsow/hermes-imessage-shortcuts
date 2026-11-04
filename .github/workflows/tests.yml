@@ -31,7 +31,7 @@ jobs:
           if [ -n "$hits" ]; then echo "off-screen padding in:"; echo "$hits"; exit 1; fi
           echo "no off-screen padding"
       - name: Run the suites
-        run: python3 -m unittest discover -s tests -p 'test_*.py' -v 2>&1 | tee test-output.txt
+        run: python3 -m unittest discover -s ./tests -p 'test_*.py' -v 2>&1 | tee test-output.txt
       - name: Fail if the run was smaller than the suites it should cover
         # The adapter's suite skips without Hermes; everything else must run, and the
         # summary must say so. A run that found no tests would otherwise read as green.
@@ -63,7 +63,7 @@ jobs:
           IMESSAGE_SHORTCUTS_TESTS_REQUIRE_HERMES: "1"
         run: |
           export PATH="$HOME/.local/bin:$HOME/.hermes/bin:$PATH"
-          hermes --run-module unittest discover -s tests -p 'test_*.py' -v 2>&1 | tee test-output.txt
+          hermes --run-module unittest discover -s ./tests -p 'test_*.py' -v 2>&1 | tee test-output.txt
           summary=$(grep -E '^OK|^FAILED' test-output.txt | tail -1)
           ran=$(grep -Eo 'Ran [0-9]+ tests' test-output.txt | grep -Eo '[0-9]+')
           echo "ran $ran tests: $summary"
