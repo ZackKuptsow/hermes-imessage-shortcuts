@@ -190,6 +190,50 @@ so nothing was posted), `dropped_by_plugin` (its 204), `secret_refused` (its 401
 (any other status), `plugin_unreachable` (the connection failed), `timeout` (5 seconds ran out). The
 plugin's real status is in `plugin_status`, and there is none for the last two or for `dropped`.
 
+## The check
+
+`check_relay.py` proves the relay end to end at the Mac, by breaking its gates and reading what each
+post leaves. It imports the template under its own name, webhook path and credentials, aimed at a
+stand-in plugin on a free port, and writes to a table of its own. So it never posts to the real
+plugin on 8645, never changes the real relay or reads its secrets, and never reads your handle file:
+its senders are made up, and its secrets are random for each run. It removes what it made when it
+ends, and if a run is cut short, the next one removes the leftovers first. It prints no secret,
+handle or body.
+
+Once, in the editor, make a second Data Table with the same five columns as `run_record`, named
+`run_record_check`. The check finds it by name. Then, from the repository's root:
+
+```sh
+python3 n8n/check_relay.py
+```
+
+**It restarts n8n at the start and the end of a run**, which is how a workflow published from the
+CLI takes effect. A text arriving during those few seconds is lost, so run it when none is due.
+
+Each case prints its status, the row it found, and `pass` or `FAIL`, and it exits 0 only if all of
+them held:
+
+| Case | Status | Row, and the rest |
+|---|---|---|
+| no secret, wrong secret | 403 | no row, and nothing reaches the stand-in |
+| unknown sender | 200 | `dropped`, and nothing reaches the stand-in |
+| plugin unreachable (the stand-in stopped) | 200 | `plugin_unreachable` |
+| accepted | 200 | `accepted`, 202, with the stand-in holding the body posted, unchanged |
+| dropped by the plugin, refused secret, plugin refusing | 200 | `dropped_by_plugin` 204, `secret_refused` 401, `plugin_refusing` 503 |
+| timeout (the stand-in answers after 7 seconds) | 200 | `timeout` |
+
+A last post of over 65,536 bytes is reported rather than judged, to show what the webhook does with
+a body past the plugin's limit.
+
+To see a gate fail, break it on purpose. Each of these should go red and say it was seen to fail, and
+each exits 3 if nothing noticed:
+
+```sh
+python3 n8n/check_relay.py --break wrong-header
+python3 n8n/check_relay.py --break ip-allowlist
+python3 n8n/check_relay.py --break routing-table
+```
+
 ## Upgrading
 
 First copy the database: a new n8n migrates it on its first start, and n8n does not support

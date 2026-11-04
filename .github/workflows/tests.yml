@@ -39,7 +39,7 @@ jobs:
           summary=$(grep -E '^OK|^FAILED' test-output.txt | tail -1)
           ran=$(grep -Eo 'Ran [0-9]+ tests' test-output.txt | grep -Eo '[0-9]+')
           echo "ran $ran tests: $summary"
-          test "$ran" -ge 239
+          test "$ran" -ge 308
           case "$summary" in *skipped=*) ;; *) echo "expected the adapter suite to skip here"; exit 1;; esac
 
   with-hermes:
@@ -67,5 +67,5 @@ jobs:
           summary=$(grep -E '^OK|^FAILED' test-output.txt | tail -1)
           ran=$(grep -Eo 'Ran [0-9]+ tests' test-output.txt | grep -Eo '[0-9]+')
           echo "ran $ran tests: $summary"
-          test "$ran" -ge 239
+          test "$ran" -ge 308
           case "$summary" in *skipped=*) echo "the adapter suite skipped: this is not Hermes's interpreter"; exit 1;; esac
