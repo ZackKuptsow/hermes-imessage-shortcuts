@@ -214,8 +214,8 @@ contract is `POST /` with a JSON body of `sender`, `sent_at` and `text` and the 
 
 A text that is exactly one of the service's fixed phrases does not reach the model (smart-home
 ADR 0037): `OTIS`, `STOP`, `help` or `help <topic>`, `list`, `todos`, `my todos`, `reminders`,
-`digest`, `done`, `done <number>`, `done shopping`, and `remove reminder <number>` or `cancel
-reminder <number>`, each in any case and with the full stop, `!` or `?` a phone adds. Once the
+`digest`, `digest off`, `done`, `done <number>`, `done shopping`, and `remove reminder <number>`
+or `cancel reminder <number>`, each in any case and with the full stop, `!` or `?` a phone adds. Once the
 text has passed the listener's checks, the plugin posts it itself, with the message's own
 `sent_at`, and the service's answer goes to the phone the same way, so the model's session holds
 no record of it. If the forward cannot run (no URL file, no Keychain item), the text goes to the

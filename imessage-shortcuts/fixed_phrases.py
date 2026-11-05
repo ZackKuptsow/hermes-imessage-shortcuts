@@ -16,6 +16,7 @@ CLOSING_PUNCTUATION = r"[.!?]*"
 PHRASES = (
     r"(?:cancel|remove)\s+reminder\s+\d+",
     r"digest",
+    r"digest\s+off",
     r"done",
     r"done\s+\d+",
     r"done\s+shopping",

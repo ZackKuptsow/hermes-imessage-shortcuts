@@ -17,6 +17,7 @@ PHRASES = (
     "STOP",
     "cancel reminder 2",
     "digest",
+    "digest off",
     "done",
     "done 12",
     "done 3",
@@ -45,7 +46,7 @@ NOT_PHRASES = (
     "add",
     "add milk",
     "digest at 8am",
-    "digest off",
+    "digest off please",
     "digest sections todos",
     "done 1 2",
     "done 1x",
@@ -95,7 +96,7 @@ class FixedPhraseTest(unittest.TestCase):
                     self.assertTrue(fixed_phrases.is_fixed_phrase(phrase + ending))
 
     def test_space_around_and_between_the_words_does_not_matter(self):
-        for written in ("  done  ", "\ndone\n", "done   shopping", "my \t todos", "remove  reminder  2"):
+        for written in ("  done  ", "\ndone\n", "digest   off", "done   shopping", "my \t todos", "remove  reminder  2"):
             with self.subTest(written):
                 self.assertTrue(fixed_phrases.is_fixed_phrase(written))
 
