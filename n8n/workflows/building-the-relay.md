@@ -90,11 +90,13 @@ On the node's **Settings** tab: On Error `Continue (using error output)`; Retry 
 | Name | Type | Value |
 |---|---|---|
 | `route` | String | `zack` |
-| `outcome` | String | **expression** `{{ /timeout\|TIMEDOUT/.test(JSON.stringify($json)) ? 'timeout' : 'plugin_unreachable' }}` |
+| `outcome` | String | **expression** `{{ /timeout\|TIMEDOUT/.test(String($json.error?.message) + ' ' + String($json.error?.code)) ? 'timeout' : 'plugin_unreachable' }}` |
 | `received_at` | String | **expression** `{{ $('Routing table').first().json.received_at }}` |
 | `duration_ms` | Number | **expression** `{{ $now.toMillis() - $('Routing table').first().json.started_ms }}` |
 
-In the `outcome` line, the `\|` is only how this table has to write a `|`. Type a plain `|`.
+In the `outcome` line, the `\|` is only how this table has to write a `|`. Type a plain `|`. It reads
+the error's own two fields and nothing else: n8n puts the whole incoming item beside the error here,
+text included, so reading more would let the words of a text decide the outcome.
 
 ### 7. Edit Fields (Set), named `Record drop`, from the Switch's `dropped` output
 

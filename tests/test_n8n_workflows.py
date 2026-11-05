@@ -61,6 +61,9 @@ HEX_PATTERN = re.compile(r"[0-9a-fA-F]{32,}")
 URL_PATTERN = re.compile(r"https?://([^/\s'\":]+|\[[^\]\s]+\])")
 TEXT_READ_PATTERN = re.compile(r"""\.text\b|\[\s*['"]text['"]\s*\]""")
 BODY_READ_PATTERN = re.compile(r"\$json\.body\b")
+# An expression handed a whole item, which holds the text wherever a node keeps other fields, and
+# on an error output always: n8n merges the input item in (handleNodeErrorOutput in n8n-core).
+WHOLE_ITEM_READ_PATTERN = re.compile(r"(?:\$json|\.json)(?!\s*(?:\.|\?\.|\[))|\$input\b|\$items\b")
 # The one read of the body the relay may make beyond the sender: passing it through unchanged.
 PASS_THROUGH_BODY = "={{ $json.body }}"
 SENDER_READ = "$json.body.sender"
@@ -151,6 +154,8 @@ def text_problems(template: dict) -> list[str]:
             problems.append(f"{location}: reads the text")
         if BODY_READ_PATTERN.search(string) and string != PASS_THROUGH_BODY and SENDER_READ not in string:
             problems.append(f"{location}: reads the body beyond passing it through")
+        if WHOLE_ITEM_READ_PATTERN.search(string):
+            problems.append(f"{location}: reads a whole item, and so the text with it")
     for node in nodes_of_type(template, DATA_TABLE_TYPE):
         columns = node.get("parameters", {}).get("columns", {}).get("value", {})
         if set(columns) != RUN_RECORD_COLUMNS:
@@ -346,6 +351,20 @@ class RelayRuleTest(unittest.TestCase):
         self.set_string("={{ $json.body.sent_at }}")
         self.assert_refused("beyond passing it through")
 
+    def test_an_expression_handed_a_whole_item_is_refused(self):
+        for expression in ("={{ JSON.stringify($json) }}", "={{ $json }}", "={{ String($json) }}", "={{ $input.first() }}",
+                           "={{ $items() }}", "={{ JSON.stringify($('Routing table').first().json) }}"):
+            with self.subTest(expression):
+                self.set_string(expression)
+                self.assert_refused("whole item")
+
+    def test_a_named_field_of_an_item_is_not_a_whole_item(self):
+        for expression in ("={{ $json.received_at }}", "={{ $json.error?.message }}", "={{ $json['received_at'] }}",
+                           "={{ $('Routing table').first().json.received_at }}"):
+            with self.subTest(expression):
+                self.set_string(expression)
+                self.assertFalse([problem for problem in relay_problems(self.template) if "whole item" in problem])
+
     def test_a_sixth_column_is_refused_since_it_could_store_the_text(self):
         self.node(DATA_TABLE_TYPE)["parameters"]["columns"]["value"]["note"] = "={{ $json.note }}"
         self.assert_refused("run record's five")
@@ -420,6 +439,57 @@ class SwitchExpressionTest(unittest.TestCase):
                 self.assertFalse(self.routed_to_zack(sender))
 
 
+class OutcomeExpressionTest(unittest.TestCase):
+    """The two outcome expressions, run in node against the item n8n really hands each."""
+
+    def setUp(self):
+        self.node_path = shutil.which("node")
+        self.assertIsNotNone(self.node_path, "no node on PATH, so the expressions cannot be run")
+        self.failure = self.field_of("Record failure", "outcome")
+        self.forward = self.field_of("Record forward", "outcome")
+
+    def field_of(self, node_name: str, field_name: str) -> str:
+        node = next(node for node in template_under_test()["nodes"] if node["name"] == node_name)
+        assignment = next(entry for entry in node["parameters"]["assignments"]["assignments"] if entry["name"] == field_name)
+        return assignment["value"].removeprefix("={{").removesuffix("}}").strip()
+
+    def evaluate(self, expression: str, item: dict) -> str:
+        program = f"const $json = {json.dumps(item)};\nprocess.stdout.write(JSON.stringify({expression}));"
+        result = subprocess.run([self.node_path, "-e", program], capture_output=True, text=True,
+                                timeout=TIMEOUT_SECONDS, check=True)
+        return json.loads(result.stdout)
+
+    def failure_item(self, error: object, text: str = "hello") -> dict:
+        """As n8n's error output has it: the error, with the input item merged in beside it."""
+        return {"body": {"sender": ZACK_PHONE, "sent_at": "2026-11-04T23:00:00Z", "text": text}, "error": error,
+                "received_at": "2026-11-04T23:00:00.000Z", "started_ms": 1, "zack_handles": [ZACK_PHONE]}
+
+    def test_a_refused_connection_is_unreachable(self):
+        error = {"code": "ECONNREFUSED", "message": "connect ECONNREFUSED 127.0.0.1:8645"}
+        self.assertEqual(self.evaluate(self.failure, self.failure_item(error)), "plugin_unreachable")
+
+    def test_a_text_holding_the_word_timeout_does_not_change_the_outcome(self):
+        # The text sits in the item beside the error, and must decide nothing.
+        error = {"code": "ECONNREFUSED", "message": "connect ECONNREFUSED 127.0.0.1:8645"}
+        for text in ("the timeout is at noon", "TIMEDOUT"):
+            with self.subTest(text):
+                self.assertEqual(self.evaluate(self.failure, self.failure_item(error, text)), "plugin_unreachable")
+
+    def test_running_out_of_time_is_a_timeout_by_message_or_by_code(self):
+        for error in ({"code": "ECONNABORTED", "message": "timeout of 5000ms exceeded"}, {"code": "ETIMEDOUT", "message": "socket hang up"}):
+            with self.subTest(error):
+                self.assertEqual(self.evaluate(self.failure, self.failure_item(error)), "timeout")
+
+    def test_an_error_that_is_only_a_string_is_unreachable_rather_than_a_crash(self):
+        self.assertEqual(self.evaluate(self.failure, self.failure_item("connect ECONNREFUSED")), "plugin_unreachable")
+
+    def test_each_status_maps_to_its_outcome(self):
+        for status, outcome in ((202, "accepted"), (204, "dropped_by_plugin"), (401, "secret_refused"), (400, "plugin_refusing"),
+                                (403, "plugin_refusing"), (503, "plugin_refusing")):
+            with self.subTest(status):
+                self.assertEqual(self.evaluate(self.forward, {"statusCode": status}), outcome)
+
+
 class ScriptTest(unittest.TestCase):
     """Runs render.py and export.py as the README does, file to file, in a scratch directory."""
 
@@ -485,6 +555,18 @@ class RenderTest(ScriptTest):
             with self.subTest(node_type):
                 reference = nodes_of_type(self.rendered(), node_type)[0]["credentials"][CREDENTIAL_TYPE]
                 self.assertEqual(reference, {"id": None, "name": name})
+
+    def test_each_webhook_gets_a_webhook_id_so_it_answers_on_its_own_path(self):
+        # Without one, n8n registers it at <workflow id>/<node name>/<path> (getNodeWebhookPath in
+        # n8n-workflow), and the Shortcut's address answers 404. Import adds none, and export strips it.
+        self.render()
+        webhook = nodes_of_type(self.rendered(), WEBHOOK_TYPE)[0]
+        self.assertTrue(UUID_PATTERN.fullmatch(webhook.get("webhookId", "")), "not a UUID")
+
+    def test_only_webhooks_get_a_webhook_id(self):
+        self.render()
+        others = [node["name"] for node in self.rendered()["nodes"] if node["type"] != WEBHOOK_TYPE and "webhookId" in node]
+        self.assertEqual(others, [])
 
     def test_the_file_is_written_for_its_owner_alone(self):
         self.render()
@@ -633,6 +715,16 @@ class ExportTest(ScriptTest):
                 self.assert_refused(result)
                 self.assertFalse(self.template_out.exists())
                 self.assert_no_value_printed(result)
+
+    def test_a_handle_used_as_a_name_is_refused_without_being_printed(self):
+        # A refusal names where it found something, and that place can be the handle itself.
+        workflow = self.simulated_export()
+        workflow["connections"][ZACK_PHONE] = {"main": [[{"index": 0, "node": ZACK_PHONE, "type": "main"}]]}
+        nodes_of_type(workflow, SET_TYPE)[0]["name"] = ZACK_PHONE
+        self.write_exported(workflow)
+        result = self.export(self.exported, self.template_out)
+        self.assert_refused(result)
+        self.assert_no_value_printed(result)
 
     def test_a_handle_not_in_the_file_is_refused_too(self):
         workflow = self.simulated_export()

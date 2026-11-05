@@ -170,20 +170,23 @@ When the handle file changes, the relay's table is out of date until you repeat 
 the workflow in the editor, import, publish.
 
 **6. Read a run back.** This posts one real text through n8n to the plugin, so Hermes answers it.
-`read -rs` takes the relay secret without showing it, and the handle comes from your own file:
+`read -rs` takes the relay secret without showing it, the handle comes from your own file, and both
+reach `curl` through its standard input, since a command line can be read by anyone on the Mac:
 
 ```sh
 read -rs RELAY_SECRET
 SENDER="$(grep -v '^#' ~/.hermes/profiles/imessage/data/imessage/zack-handles.txt | head -1)"
-curl -sS -o /dev/null -w '%{http_code}\n' -X POST http://127.0.0.1:5678/webhook/imessage-relay \
-  -H "X-Relay-Secret: ${RELAY_SECRET}" -H 'Content-Type: application/json' \
-  -d "{\"sender\":\"${SENDER}\",\"sent_at\":\"$(date -u +%Y-%m-%dT%H:%M:%SZ)\",\"text\":\"Reply with one word: relay.\"}"
+SENT_AT="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+printf 'header = "X-Relay-Secret: %s"\ndata = "{\\"sender\\":\\"%s\\",\\"sent_at\\":\\"%s\\",\\"text\\":\\"Reply with one word: relay.\\"}"\n' \
+  "$RELAY_SECRET" "$SENDER" "$SENT_AT" \
+  | curl -K - -sS -o /dev/null -w '%{http_code}\n' -H 'Content-Type: application/json' http://127.0.0.1:5678/webhook/imessage-relay
 sudo -u _n8n sqlite3 -readonly /var/n8n/.n8n/database.sqlite \
   'SELECT received_at, route, outcome, plugin_status, duration_ms FROM data_table_user_TABLE_ID;'
 ```
 
 The `curl` prints `200`, since the webhook answers before anything else runs. The row should read
-route `zack`, outcome `accepted`, status `202`, and the reply should reach your phone.
+route `zack`, outcome `accepted`, status `202.0` (Data Table numbers are stored as reals), and the
+reply should reach your phone.
 
 **The outcomes**, a closed list: `accepted` (the plugin's 202), `dropped` (not in the routing table,
 so nothing was posted), `dropped_by_plugin` (its 204), `secret_refused` (its 401), `plugin_refusing`

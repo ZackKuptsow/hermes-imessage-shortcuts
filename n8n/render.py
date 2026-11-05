@@ -15,11 +15,13 @@ import copy
 import json
 import os
 import sys
+import uuid
 from pathlib import Path
 
 import workflow_template
 
 OWNER_ONLY_MODE = 0o600
+WEBHOOK_NODE_TYPE = "n8n-nodes-base.webhook"
 
 
 def with_null_credential_ids(workflow: dict) -> dict:
@@ -33,6 +35,20 @@ def with_null_credential_ids(workflow: dict) -> dict:
     for node in rendered.get("nodes", []):
         for reference in node.get("credentials", {}).values():
             reference["id"] = None
+    return rendered
+
+
+def with_webhook_ids(workflow: dict) -> dict:
+    """A copy in which every Webhook node has a webhook id of its own.
+
+    The template carries none, since an id is specific to an instance. But without one n8n
+    registers a webhook at <workflow id>/<node name>/<path> rather than at its path
+    (getNodeWebhookPath in n8n-workflow), and importing a workflow does not add one.
+    """
+    rendered = copy.deepcopy(workflow)
+    for node in rendered.get("nodes", []):
+        if node.get("type") == WEBHOOK_NODE_TYPE:
+            node["webhookId"] = str(uuid.uuid4())
     return rendered
 
 
@@ -50,7 +66,7 @@ def render_workflow(template: dict, handles: tuple[str, ...], table_id: str) -> 
     def fill(string: str) -> str:
         return string.replace(workflow_template.HANDLES_TOKEN, handles_array).replace(workflow_template.TABLE_TOKEN, table_id)
 
-    return with_null_credential_ids(workflow_template.map_string_values(template, fill))
+    return with_webhook_ids(with_null_credential_ids(workflow_template.map_string_values(template, fill)))
 
 
 def write_owner_only(path: Path, text: str) -> None:
