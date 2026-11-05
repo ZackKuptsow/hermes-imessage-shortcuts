@@ -119,7 +119,7 @@ class FixedPhraseRoutingTest(AdapterHarness):
 
     async def test_a_free_text_command_reaches_the_model_and_not_the_service(self):
         adapter = await self.start_adapter()
-        for text in ("remind me in 2 minutes test", "add milk", "what is on my calendar", "digest off"):
+        for text in ("remind me in 2 minutes test", "add milk", "what is on my calendar", "digest at 8am"):
             with self.subTest(text):
                 await self.post_and_settle(adapter, self.message(text=text))
                 self.assertEqual(adapter.handle_message.await_args.args[0].text, text)
