@@ -210,8 +210,9 @@ Once, in the editor, make a second Data Table with the same five columns as `run
 python3 n8n/check_relay.py
 ```
 
-**It restarts n8n at the start and the end of a run**, which is how a workflow published from the
-CLI takes effect. A text arriving during those few seconds is lost, so run it when none is due.
+It does not restart n8n, so the real relay keeps serving through a run. It publishes through the CLI,
+and the running daemon picks that up within about half a minute. Removing its workflow takes as long
+again: n8n refuses to delete a workflow until the daemon has finished unpublishing it.
 
 Each case prints its status, the row it found, and `pass` or `FAIL`, and it exits 0 only if all of
 them held:

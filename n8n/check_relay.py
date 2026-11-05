@@ -10,9 +10,9 @@ row each leaves, then removes everything it made. The senders are made up and th
 for each run, so it never reads your handle file or your secrets, and it prints no secret, handle
 or body. With --break it breaks one gate on purpose: that run should go red.
 
-n8n restarts at the start and end of a run: a workflow published from the CLI takes effect only at
-a restart, and n8n has no other way in with its public API off. Any text arriving during one of
-those few seconds is lost, so run this when none is due. Exits 0 only when every case held.
+It publishes through n8n's CLI and lets the running daemon pick that up, which its reconciler does
+within about half a minute, so n8n is never restarted and the real relay keeps serving through a
+run. Exits 0 only when every case held.
 """
 
 from __future__ import annotations
@@ -22,6 +22,7 @@ import copy
 import http.server
 import json
 import secrets
+import signal
 import subprocess
 import sys
 import threading
@@ -46,9 +47,10 @@ N8N_HOME = "/var/n8n"
 DATABASE_PATH = "/var/n8n/.n8n/database.sqlite"
 SQLITE_PATH = "/usr/bin/sqlite3"
 SQLITE_BUSY_WAIT = ".timeout 5000"
-DAEMON_SERVICE = "system/com.zack.hermes-imessage.n8n"
-HEALTH_URL = "http://127.0.0.1:5678/healthz"
-HEALTH_WAIT_SECONDS = 180
+HAND_OVER_FOLDER_PREFIX = "check."
+# n8n's reconciler looks every 10 seconds and its outbox every 15, on the daemon's own clock.
+UNPUBLISH_WAIT_SECONDS = 60.0
+UNPUBLISH_POLL_SECONDS = 1.0
 
 CHECK_TABLE_NAME = "run_record_check"
 CHECK_WORKFLOW_NAME = "iMessage relay check"
@@ -68,7 +70,9 @@ REAL_PLUGIN_ADDRESS = "127.0.0.1:8645"
 # 555-01XX numbers are set aside for fiction, so neither of these can be anyone's.
 KNOWN_SENDER = "+15550100199"
 UNKNOWN_SENDER = "+15550100142"
-CHECK_TEXT = "relay check ☃ \U0001f600"
+# Holds the word the relay's failure outcome looks for, so a text deciding an outcome shows up, and
+# characters that would not survive a careless re-encoding on the way through.
+CHECK_TEXT = "relay check: timeout \u2603 \U0001f600"
 LONG_TEXT_LENGTH = 70_000
 
 BREAK_WRONG_HEADER = "wrong-header"
@@ -86,8 +90,6 @@ MALFORMED_STATUS = 400
 NOT_SERVING_STATUS = 503
 FORBIDDEN_STATUS = 403
 RECEIVED_STATUS = 200
-HEALTHY_STATUS = 200
-WEBHOOK_NOT_REGISTERED_STATUS = 404
 NO_ANSWER_STATUS = 0
 PLUGIN_BODY_LIMIT_BYTES = 65_536
 POST_TIMEOUT_SECONDS = 15
@@ -281,13 +283,19 @@ def post_to_webhook(url: str, secret: str | None, body: bytes) -> int:
 
 
 def wait_for_webhook(url: str, timing: Timing) -> None:
-    """Until n8n has registered the check's webhook. Raises CheckError if it never does."""
+    """Until the check's webhook answers a post with no secret as its gate should, with a 403.
+
+    Only that counts: a 404 means it is not registered yet, and an n8n still starting answers 200
+    to anything. Raises CheckError if it never does, saying what it last answered.
+    """
     deadline = time.monotonic() + timing.webhook_wait_seconds
+    last_status = NO_ANSWER_STATUS
     while time.monotonic() < deadline:
-        if post_to_webhook(url, None, b"{}") not in (WEBHOOK_NOT_REGISTERED_STATUS, NO_ANSWER_STATUS):
+        last_status = post_to_webhook(url, None, b"{}")
+        if last_status == FORBIDDEN_STATUS:
             return
         time.sleep(timing.poll_seconds)
-    raise CheckError(f"n8n did not register the check's webhook within {timing.webhook_wait_seconds:g}s; is it published?")
+    raise CheckError(f"the check's webhook did not register within {timing.webhook_wait_seconds:g}s; it last answered {last_status}")
 
 
 def wait_for_new_rows(instance: object, rows_before: int, timing: Timing) -> list[dict]:
@@ -375,16 +383,14 @@ def record_the_over_long_body(instance: object, stand_in: StandInPlugin, webhook
 
 def exercise(instance: object, stand_in: StandInPlugin, template: dict, table_id: str, gate_broken: str | None,
              timing: Timing, report: Report, webhook_url: str) -> int:
-    """Everything between the clean-ups: install, restart, every case. Returns the exit code."""
+    """Everything between the clean-ups: install, every case. Returns the exit code."""
     relay_secret, plugin_secret = secrets.token_hex(32), secrets.token_hex(32)
-    report(f"n8n restarts now and again at the end{'' if gate_broken is None else f'; {gate_broken} is broken on purpose'}")
+    report(f"publishing the check's workflow, which takes about half a minute{'' if gate_broken is None else f'; {gate_broken} is broken on purpose'}")
     if instance.leftovers():
         report("removing what an interrupted run left")
         instance.remove_leftovers()
-        instance.restart()
     workflow = build_check_workflow(template, stand_in.url, table_id, gate_broken)
     instance.install(workflow, check_credentials(relay_secret, plugin_secret, gate_broken))
-    instance.restart()
     wait_for_webhook(webhook_url, timing)
     cases = relay_cases(timing)
     passed = 0
@@ -415,7 +421,6 @@ def run_check(instance: object, template: dict, table_id: str, gate_broken: str 
         stand_in.stop()
         try:
             instance.remove_leftovers()
-            instance.restart()
         except CheckError as error:
             clean_up_problem = str(error)
     if clean_up_problem:
@@ -436,50 +441,99 @@ def run_check(instance: object, template: dict, table_id: str, gate_broken: str 
 class N8nInstance:
     """The real n8n: every command as `_n8n` or through n8n-cli.sh, and no secret on a command line."""
 
-    def __init__(self, table_id: str, run: Callable[..., subprocess.CompletedProcess[str]] = subprocess.run):
+    def __init__(self, table_id: str, run: Callable[..., subprocess.CompletedProcess[str]] = subprocess.run,
+                 home: str = N8N_HOME, database: str = DATABASE_PATH, unpublish_wait_seconds: float = UNPUBLISH_WAIT_SECONDS,
+                 poll_seconds: float = UNPUBLISH_POLL_SECONDS):
         if not workflow_template.TABLE_ID_PATTERN.match(table_id):
             raise CheckError("the check table's id holds characters n8n's ids do not")
         self.table_name = f"data_table_user_{table_id}"
         self.run = run
+        self.home = home
+        self.database = database
+        self.unpublish_wait_seconds = unpublish_wait_seconds
+        self.poll_seconds = poll_seconds
 
     def _as_n8n(self, *command: str, input_text: str | None = None) -> subprocess.CompletedProcess[str]:
-        return self.run(["sudo", "-u", N8N_USER, *command], cwd=N8N_HOME, input=input_text, capture_output=True, text=True, check=False)
+        return self.run(["sudo", "-u", N8N_USER, *command], cwd=self.home, input=input_text, capture_output=True, text=True, check=False)
 
     def _read(self, sql: str) -> list[dict]:
-        result = self._as_n8n(SQLITE_PATH, "-readonly", "-json", "-cmd", SQLITE_BUSY_WAIT, DATABASE_PATH, sql)
+        result = self._as_n8n(SQLITE_PATH, "-readonly", "-json", "-cmd", SQLITE_BUSY_WAIT, self.database, sql)
         if result.returncode != 0:
             raise CheckError(f"sqlite3 could not read n8n's database, exit {result.returncode}")
         return json.loads(result.stdout) if result.stdout.strip() else []
 
+    def _count(self, sql: str) -> int:
+        rows = self._read(f"SELECT ({sql}) AS found")
+        return rows[0]["found"] if rows else 0
+
     def _cli(self, *arguments: str) -> None:
         result = self.run([str(CLI_SCRIPT), *arguments], capture_output=True, text=True, check=False)
         if result.returncode != 0:
-            raise CheckError(f"n8n {arguments[0]} failed, exit {result.returncode}; run it by hand through n8n-cli.sh to see why")
+            raise CheckError(f"n8n {arguments[0]} failed, exit {result.returncode}; try it by hand through n8n-cli.sh to see why")
 
     def rows(self) -> list[dict]:
         """The check table's rows, oldest first."""
         return self._read(f"SELECT received_at, route, outcome, plugin_status, duration_ms FROM {self.table_name} ORDER BY id")
 
+    def _publication_rows_left(self) -> int:
+        """The row that says the check's workflow is published, the last thing the daemon removes."""
+        return self._count(f"SELECT COUNT(*) FROM workflow_published_version WHERE workflowId = '{CHECK_WORKFLOW_ID}'")
+
     def leftovers(self) -> int:
-        """How many things of the check's are in n8n now."""
-        rows = self._read(
+        """How many things of the check's are in n8n now, the rows nothing cascades to included."""
+        return self._count(
             f"SELECT (SELECT COUNT(*) FROM workflow_entity WHERE id = '{CHECK_WORKFLOW_ID}')"
             f" + (SELECT COUNT(*) FROM credentials_entity WHERE id IN ('{CHECK_RELAY_CREDENTIAL_ID}', '{CHECK_PLUGIN_CREDENTIAL_ID}'))"
-            f" + (SELECT COUNT(*) FROM {self.table_name}) AS leftovers")
-        return rows[0]["leftovers"] if rows else 0
+            f" + (SELECT COUNT(*) FROM workflow_published_version WHERE workflowId = '{CHECK_WORKFLOW_ID}')"
+            f" + (SELECT COUNT(*) FROM webhook_entity WHERE workflowId = '{CHECK_WORKFLOW_ID}')"
+            f" + (SELECT COUNT(*) FROM workflow_publication_outbox WHERE workflowId = '{CHECK_WORKFLOW_ID}')"
+            f" + (SELECT COUNT(*) FROM workflow_statistics WHERE workflowId = '{CHECK_WORKFLOW_ID}')"
+            f" + (SELECT COUNT(*) FROM {self.table_name})")
+
+    def _unpublish(self) -> None:
+        """Unpublish the check's workflow and wait for the daemon to finish taking it down.
+
+        n8n's foreign key refuses to delete a published workflow, and only the running daemon
+        removes the row that says it is one, so a delete before that fails, and fails again.
+        """
+        self._cli("unpublish:workflow", f"--id={CHECK_WORKFLOW_ID}")
+        deadline = time.monotonic() + self.unpublish_wait_seconds
+        while self._publication_rows_left():
+            if time.monotonic() >= deadline:
+                raise CheckError(f"n8n had not finished unpublishing the check's workflow after {self.unpublish_wait_seconds:g}s")
+            time.sleep(self.poll_seconds)
+
+    def _sweep_hand_over_folders(self) -> None:
+        """A run killed outright leaves its folder, which holds that run's random secrets."""
+        result = self._as_n8n("/usr/bin/find", self.home, "-maxdepth", "1", "-type", "d", "-name", f"{HAND_OVER_FOLDER_PREFIX}*",
+                              "-exec", "/bin/rm", "-rf", "{}", "+")
+        if result.returncode != 0:
+            raise CheckError(f"could not remove the check's folders from {self.home}, exit {result.returncode}")
 
     def remove_leftovers(self) -> None:
-        """The check's workflow, credentials and rows, each by its own id, the way n8n deletes them."""
-        sql = (f"PRAGMA foreign_keys=ON; DELETE FROM workflow_entity WHERE id = '{CHECK_WORKFLOW_ID}';"
+        """Everything of the check's, each by its own id, all of it or none of it.
+
+        Three tables have no foreign key to the workflow, so nothing would clear them for it. Only
+        the check's own table is emptied, and that one is the check's alone.
+        """
+        self._sweep_hand_over_folders()
+        if self._count(f"SELECT COUNT(*) FROM workflow_entity WHERE id = '{CHECK_WORKFLOW_ID}'"):
+            self._unpublish()
+        sql = ("PRAGMA foreign_keys=ON; BEGIN;"
+               f" DELETE FROM webhook_entity WHERE workflowId = '{CHECK_WORKFLOW_ID}';"
+               f" DELETE FROM workflow_publication_outbox WHERE workflowId = '{CHECK_WORKFLOW_ID}';"
+               f" DELETE FROM workflow_statistics WHERE workflowId = '{CHECK_WORKFLOW_ID}';"
+               f" DELETE FROM workflow_entity WHERE id = '{CHECK_WORKFLOW_ID}';"
                f" DELETE FROM credentials_entity WHERE id IN ('{CHECK_RELAY_CREDENTIAL_ID}', '{CHECK_PLUGIN_CREDENTIAL_ID}');"
-               f" DELETE FROM {self.table_name};")
-        result = self._as_n8n(SQLITE_PATH, "-cmd", SQLITE_BUSY_WAIT, DATABASE_PATH, sql)
+               f" DELETE FROM {self.table_name};"
+               " COMMIT;")
+        result = self._as_n8n(SQLITE_PATH, "-cmd", SQLITE_BUSY_WAIT, self.database, sql)
         if result.returncode != 0:
             raise CheckError(f"sqlite3 could not remove the check's leftovers, exit {result.returncode}")
 
     def install(self, workflow: dict, credentials: list[dict]) -> None:
         """Import the credentials and the workflow and publish it. The copies go whatever happens."""
-        made = self._as_n8n("/usr/bin/mktemp", "-d", f"{N8N_HOME}/check.XXXXXX")
+        made = self._as_n8n("/usr/bin/mktemp", "-d", f"{self.home}/{HAND_OVER_FOLDER_PREFIX}XXXXXX")
         directory = made.stdout.strip()
         if made.returncode != 0 or not directory:
             raise CheckError(f"could not make a folder {N8N_USER} can read")
@@ -494,38 +548,13 @@ class N8nInstance:
         finally:
             self._as_n8n("/bin/rm", "-rf", directory)
 
-    def restart_daemon(self) -> None:
-        """Have launchd restart n8n, which is when a workflow published from the CLI takes effect."""
-        result = self.run(["sudo", "launchctl", "kickstart", "-k", DAEMON_SERVICE], capture_output=True, text=True, check=False)
-        if result.returncode != 0:
-            raise CheckError(f"launchctl could not restart n8n, exit {result.returncode}")
 
-    def restart(self) -> None:
-        """Restart n8n and wait until it answers."""
-        self.restart_daemon()
-        wait_until_healthy(HEALTH_URL, HEALTH_WAIT_SECONDS, poll_seconds=1.0)
-
-
-def wait_until_healthy(url: str, wait_seconds: float, poll_seconds: float) -> None:
-    """Until *url* answers 200. Raises CheckError if it never does."""
-    opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
-    deadline = time.monotonic() + wait_seconds
-    while time.monotonic() < deadline:
-        try:
-            with opener.open(url, timeout=poll_seconds + 1) as response:
-                if response.status == HEALTHY_STATUS:
-                    return
-        except (urllib.error.URLError, TimeoutError, ConnectionError):
-            pass  # still starting, which is what the loop is waiting out
-        time.sleep(poll_seconds)
-    raise CheckError(f"n8n did not answer {url} within {wait_seconds:g}s")
-
-
-def find_check_table(run: Callable[..., subprocess.CompletedProcess[str]] = subprocess.run) -> str:
+def find_check_table(run: Callable[..., subprocess.CompletedProcess[str]] = subprocess.run, home: str = N8N_HOME,
+                     database: str = DATABASE_PATH) -> str:
     """The id of the `run_record_check` Data Table. Raises CheckError saying how to make it."""
     sql = f"SELECT id FROM data_table WHERE name = '{CHECK_TABLE_NAME}'"
-    result = run(["sudo", "-u", N8N_USER, SQLITE_PATH, "-readonly", "-cmd", SQLITE_BUSY_WAIT, DATABASE_PATH, sql],
-                 cwd=N8N_HOME, capture_output=True, text=True, check=False)
+    result = run(["sudo", "-u", N8N_USER, SQLITE_PATH, "-readonly", "-cmd", SQLITE_BUSY_WAIT, database, sql],
+                 cwd=home, capture_output=True, text=True, check=False)
     if result.returncode != 0:
         raise CheckError(f"sqlite3 could not read n8n's database, exit {result.returncode}")
     identifiers = result.stdout.split()
@@ -534,11 +563,21 @@ def find_check_table(run: Callable[..., subprocess.CompletedProcess[str]] = subp
     return identifiers[0]
 
 
+def interrupt_on_termination() -> None:
+    """Treat a closed terminal or a `kill` as Ctrl-C, so the clean-up runs for those too."""
+    def interrupted(*_: object) -> None:
+        raise KeyboardInterrupt
+
+    for signal_number in (signal.SIGHUP, signal.SIGTERM):
+        signal.signal(signal_number, interrupted)
+
+
 def main() -> int:
     """Parse the arguments and run the check."""
     parser = argparse.ArgumentParser(description="Prove the relay end to end against a stand-in plugin.")
     parser.add_argument("--break", dest="gate_broken", choices=GATES_TO_BREAK, help="break this gate on purpose; the run should go red")
     arguments = parser.parse_args()
+    interrupt_on_termination()
     try:
         template = workflow_template.read_json(RELAY_TEMPLATE)
         table_id = find_check_table()
