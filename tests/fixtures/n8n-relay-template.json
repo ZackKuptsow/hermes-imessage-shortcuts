@@ -300,7 +300,7 @@
               "id": "b3000000-0000-4000-8000-000000000002",
               "name": "outcome",
               "type": "string",
-              "value": "={{ /timeout|TIMEDOUT/.test(JSON.stringify($json)) ? 'timeout' : 'plugin_unreachable' }}"
+              "value": "={{ /timeout|TIMEDOUT/.test(String($json.error?.message) + ' ' + String($json.error?.code)) ? 'timeout' : 'plugin_unreachable' }}"
             },
             {
               "id": "b3000000-0000-4000-8000-000000000003",

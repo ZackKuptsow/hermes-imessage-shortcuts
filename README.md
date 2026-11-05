@@ -231,7 +231,7 @@ python3 -m unittest discover -s ./tests -p 'test_*.py'
 ```
 
 The adapter's suite needs Hermes's own environment (`gateway`, `aiohttp`) and skips without
-it. The full run, 239 tests, is:
+it. The full run, 249 tests, is:
 
 ```sh
 IMESSAGE_SHORTCUTS_TESTS_REQUIRE_HERMES=1 hermes --run-module unittest discover -s ./tests -p 'test_*.py'

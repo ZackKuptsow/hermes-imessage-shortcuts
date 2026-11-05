@@ -88,13 +88,20 @@ def tokenised(workflow: dict, allowed: tuple[str, ...], table_id: str) -> dict:
     return workflow_template.map_string_values(workflow, take_values_out)
 
 
+def looks_like_a_handle(string: str) -> bool:
+    """Whether *string* holds what could be a phone number or an email address."""
+    without_ids = UUID_PATTERN.sub("", string)
+    return bool(PHONE_PATTERN.search(without_ids) or EMAIL_PATTERN.search(without_ids))
+
+
 def stray_handle_locations(node: object, location: str = "") -> list[str]:
-    """Where in *node* a string value still looks like a handle. Names the place, never the value."""
+    """Where in *node* a string value still looks like a handle. Names the place, never the value,
+    and a key that looks like one is not named either: it would print the very thing refused."""
     if isinstance(node, str):
-        without_ids = UUID_PATTERN.sub("", node)
-        return [location] if PHONE_PATTERN.search(without_ids) or EMAIL_PATTERN.search(without_ids) else []
+        return [location] if looks_like_a_handle(node) else []
     if isinstance(node, dict):
-        return [found for key, value in node.items() for found in stray_handle_locations(value, f"{location}/{key}")]
+        return [found for key, value in node.items()
+                for found in stray_handle_locations(value, f"{location}/{'<a name>' if looks_like_a_handle(key) else key}")]
     if isinstance(node, list):
         return [found for index, value in enumerate(node) for found in stray_handle_locations(value, f"{location}/{index}")]
     return []
