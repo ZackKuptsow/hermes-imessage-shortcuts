@@ -30,6 +30,11 @@ leaves the way a reply does (`_send_text`), so the third wall holds for it too.
 A 204 says why it dropped a request in X-Imessage-Dropped, one of DropReason's words, so
 n8n can alarm on a sender drop and not on a duplicate or an empty text.
 
+A text that is exactly one of the household service's fixed phrases goes to that service and
+never to the gateway, once every check on the text has passed, so the model sees neither it nor
+the answer (smart-home ADR 0037). If the forward cannot run, the text goes to the gateway as
+before. If it runs and fails, Zack is texted the outcome's fixed summary.
+
 Nothing here logs a text, a handle or the secret.
 """
 
@@ -51,7 +56,7 @@ from gateway.platforms.helpers import MessageDeduplicator, send_chunks, strip_ma
 from hermes_cli.config import get_config_path
 from hermes_constants import get_hermes_home
 
-from . import allowed_toolsets, handles, imsg, inbound
+from . import allowed_toolsets, fixed_phrases, handles, household, imsg, inbound
 
 DEFAULT_HOST = "127.0.0.1"
 DEFAULT_PORT = 8645
@@ -69,6 +74,7 @@ LOOPBACK_ADDRESSES = frozenset({"127.0.0.1", "::1"})
 MAX_MESSAGE_LENGTH = 4000
 PARTIAL_OVERFLOW_KEY = "partial_overflow"  # send_chunks's mark of a send that failed after earlier chunks landed
 PLATFORM_NAME = "imessage_shortcuts"
+ROUTED_FAILURE_TEXT = "Something went wrong reaching the household assistant, so that may not have been done."
 SEND_PATH = "/imessage/send"
 # The gateway commands a text may run (smart-home ADR 0035): a fresh session, stopping a
 # reply, and the two replies to /new's confirmation. Any other reaches the model as words.
@@ -326,7 +332,8 @@ class ImessageShortcutsAdapter(BasePlatformAdapter):
 
         A 204's X-Imessage-Dropped says why: `sender`, `empty` or `duplicate`. 403 from a peer
         off the loopback address; 503 while the platform is not serving, or once the profile
-        would let a text reach a toolset beyond the two.
+        would let a text reach a toolset beyond the two. A taken text goes to the household
+        service when it is exactly a fixed phrase (`_route_fixed_phrase`), else to the gateway.
         """
         settings = self._admit(request)
         if isinstance(settings, web.Response):
@@ -358,10 +365,42 @@ class ImessageShortcutsAdapter(BasePlatformAdapter):
         event = MessageEvent(text=posted.text, message_type=MessageType.TEXT, source=source, message_id=message_id)
         if event.is_command() and event.get_command() not in TEXT_COMMANDS:
             event.allow_gateway_control = False  # it reaches the model as words (smart-home ADR 0035)
-        task = asyncio.create_task(self.handle_message(event))
+        handling = (self._route_fixed_phrase(settings, posted, sender, event)
+                    if fixed_phrases.is_fixed_phrase(posted.text) else self.handle_message(event))
+        task = asyncio.create_task(handling)
         self._background_tasks.add(task)
         task.add_done_callback(self._background_tasks.discard)
         return web.Response(status=202)
+
+    async def _route_fixed_phrase(self, settings: StartupSettings, posted: inbound.PostedMessage, sender: str,
+                                  event: MessageEvent) -> None:
+        """Post a fixed phrase to the household service, around the model (smart-home ADR 0037).
+
+        The post carries the message's own moment, so the function's duplicate check holds for a
+        repeated delivery. The gateway gets the text only when the forward cannot run. Zack is told
+        of any other failure, in words that hold no household data, and the log gets one line.
+        """
+        forward_settings = household.ForwardSettings(
+            allow_list_path=allow_list_path(),
+            function_url_path=get_hermes_home() / household.FUNCTION_URL_RELATIVE_PATH,
+            imsg_path=settings.imsg_path)
+        try:
+            outcome = await asyncio.to_thread(household.forward_household_command, posted.text, forward_settings,
+                                              clock=lambda: posted.sent_at)
+        except household.ForwardError as error:
+            logger.warning(f"{LOG_PREFIX} handed a fixed phrase to the gateway: {error}")
+            await self.handle_message(event)
+            return
+        except Exception as error:  # noqa: BLE001 -- nothing awaits this task, so a raise would lose the text silently
+            # The type alone: a UnicodeDecodeError holds the whole answer.
+            logger.error(f"{LOG_PREFIX} a routed fixed phrase failed: {type(error).__name__}")
+            await self._send_text(settings, sender, ROUTED_FAILURE_TEXT)
+            return
+        if outcome.delivered or outcome.nothing_to_send:
+            logger.info(f"{LOG_PREFIX} routed a fixed phrase to the household service: HTTP {outcome.status}")
+            return
+        logger.error(f"{LOG_PREFIX} a routed fixed phrase failed: {outcome.summary}")
+        await self._send_text(settings, sender, outcome.summary)
 
     async def _handle_send(self, request: web.Request) -> web.Response:
         """Send one text for a loopback caller with the secret, to a handle on the allow list.
