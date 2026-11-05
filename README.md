@@ -212,11 +212,24 @@ carry the other person's data; the tool reports only whether it was delivered. T
 contract is `POST /` with a JSON body of `sender`, `sent_at` and `text` and the secret in
 `X-Household-Assistant-Secret`. `bin/household-forward` is the same forward from a terminal.
 
+A text that is exactly one of the service's fixed phrases does not reach the model (smart-home
+ADR 0037): `OTIS`, `STOP`, `help` or `help <topic>`, `list`, `todos`, `my todos`, `reminders`,
+`digest`, `done`, `done <number>`, `done shopping`, and `remove reminder <number>` or `cancel
+reminder <number>`, each in any case and with the full stop, `!` or `?` a phone adds. Once the
+text has passed the listener's checks, the plugin posts it itself, with the message's own
+`sent_at`, and the service's answer goes to the phone the same way, so the model's session holds
+no record of it. If the forward cannot run (no URL file, no Keychain item), the text goes to the
+gateway as before. If it runs and fails, the phone gets a fixed line that holds no household
+data and the log gets one line with no text. Every other text reaches the model, which may still
+call the tool. `fixed_phrases.py` is the plugin's copy of the list, pinned by
+`tests/test_fixed_phrases.py` to the ADR: a phrase the service adds reaches the model until it is
+added there.
+
 ## Layout
 
 | Path | What it is |
 |---|---|
-| `imessage-shortcuts/` | the plugin: `adapter.py` (the loopback listener, `POST /imessage` for texts and `POST /imessage/send` for a text out without the model, each `204` saying why in `X-Imessage-Dropped`, and the replies), `handles.py` (canonical handles and the allow list), `allowed_toolsets.py` (the closed list of toolsets a text may reach), `inbound.py` (the request's shape), `imsg.py` (finding and calling imsg), `household.py` and `tools.py` (the optional forward), `registration.py`, `plugin.yaml` |
+| `imessage-shortcuts/` | the plugin: `adapter.py` (the loopback listener, `POST /imessage` for texts and `POST /imessage/send` for a text out without the model, each `204` saying why in `X-Imessage-Dropped`, and the replies), `handles.py` (canonical handles and the allow list), `allowed_toolsets.py` (the closed list of toolsets a text may reach), `inbound.py` (the request's shape), `imsg.py` (finding and calling imsg), `household.py` and `tools.py` (the optional forward), `fixed_phrases.py` (the texts that go to the household service around the model), `registration.py`, `plugin.yaml` |
 | `bin/imessage-reply` | sends one iMessage, only to a handle on the allow list; a check that imsg works |
 | `bin/household-forward` | forwards one command from a terminal; prints only whether the answer was delivered |
 | `n8n/` | n8n as its own macOS user under a LaunchDaemon, for the relay to come: `install.sh`, `watch-egress.sh`, the plist in `launchd/`, and its own `README.md` |
@@ -231,7 +244,7 @@ python3 -m unittest discover -s ./tests -p 'test_*.py'
 ```
 
 The adapter's suite needs Hermes's own environment (`gateway`, `aiohttp`) and skips without
-it. The full run, 165 tests, is:
+it. The full run, 186 tests, is:
 
 ```sh
 IMESSAGE_SHORTCUTS_TESTS_REQUIRE_HERMES=1 hermes --run-module unittest discover -s ./tests -p 'test_*.py'

@@ -65,7 +65,9 @@ class RegistryContext:
 
 
 @unittest.skipUnless(hermes_is_importable() or hermes_is_required(), "needs Hermes's interpreter (gateway, aiohttp)")
-class AdapterTest(unittest.IsolatedAsyncioTestCase):
+class AdapterHarness(unittest.IsolatedAsyncioTestCase):
+    """The profile, the stand-in imsg and the listener, for the suites that test the adapter. It holds no test."""
+
     @classmethod
     def setUpClass(cls):
         cls.context = RegistryContext()
@@ -175,6 +177,8 @@ class AdapterTest(unittest.IsolatedAsyncioTestCase):
     def message(sender: str = "+1 (555) 010-0199", text: str = TEXT) -> dict:
         return {"sender": sender, "sent_at": "2026-10-27T13:14:05-04:00", "text": text}
 
+
+class AdapterTest(AdapterHarness):
     # --- what the plugin registers -------------------------------------------------------
 
     def test_the_entry_point_registers_the_tool_and_a_platform_that_never_pairs(self):
