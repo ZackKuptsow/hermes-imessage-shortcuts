@@ -173,7 +173,7 @@
                 "conditions": [
                   {
                     "id": "c1000000-0000-4000-8000-000000000001",
-                    "leftValue": "={{ $json.zack_handles.includes(((s) => s.includes('@') ? s.toLowerCase() : ((d) => /^\\d{10}$/.test(d) ? '+1' + d : /^1\\d{10}$/.test(d) ? '+' + d : d)(s.replace(/[\\s().\\- ]/g, '')))(String($json.body.sender).trim())) }}",
+                    "leftValue": "={{ $json.zack_handles.includes(((s) => s.includes('@') ? s.toLowerCase() : ((d) => /^\\d{10}$/.test(d) ? '+1' + d : /^1\\d{10}$/.test(d) ? '+' + d : d)(s.replace(/[\\s().\\-]/g, '')))(String($json.body.sender).trim())) }}",
                     "operator": {
                       "name": "filter.operator.true",
                       "operation": "true",

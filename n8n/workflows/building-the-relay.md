@@ -46,7 +46,7 @@ The switchboard. Mode `Rules`, with one routing rule:
 - Value 1, **expression**, the whole line:
 
   ```
-  {{ $json.zack_handles.includes(((s) => s.includes('@') ? s.toLowerCase() : ((d) => /^\d{10}$/.test(d) ? '+1' + d : /^1\d{10}$/.test(d) ? '+' + d : d)(s.replace(/[\s().\- ]/g, '')))(String($json.body.sender).trim())) }}
+  {{ $json.zack_handles.includes(((s) => s.includes('@') ? s.toLowerCase() : ((d) => /^\d{10}$/.test(d) ? '+1' + d : /^1\d{10}$/.test(d) ? '+' + d : d)(s.replace(/[\s().\-]/g, '')))(String($json.body.sender).trim())) }}
   ```
 
 - Operator: Boolean, `is true`.
