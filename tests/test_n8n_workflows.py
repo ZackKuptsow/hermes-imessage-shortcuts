@@ -214,9 +214,8 @@ def relay_problems(template: dict) -> list[str]:
 
 
 def template_under_test() -> dict:
-    """The real relay once it exists; until the editor has made it, the fixture holds its shape."""
-    path = RELAY_TEMPLATE if RELAY_TEMPLATE.exists() else FIXTURE_TEMPLATE
-    return json.loads(path.read_text(encoding="utf-8"))
+    """The relay as n8n's editor exported it. Missing, every test of it fails rather than reading the fixture."""
+    return json.loads(RELAY_TEMPLATE.read_text(encoding="utf-8"))
 
 
 class RelayTemplateTest(unittest.TestCase):
