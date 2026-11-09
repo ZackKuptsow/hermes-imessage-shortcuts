@@ -125,8 +125,14 @@ template refers to them by name and holds neither secret.
 | `Shortcuts relay secret` | `X-Relay-Secret` | a new secret from `openssl rand -hex 32`, kept in your password manager; the Shortcut will send it |
 | `Hermes iMessage plugin secret` | `X-Hermes-Secret` | a copy of `IMESSAGE_SHORTCUTS_SECRET` from `~/.hermes/profiles/imessage/.env` |
 
+Set each one's **Allowed HTTP Request Domains** too. n8n applies it to the HTTP Request and GraphQL
+nodes alone, so `Shortcuts relay secret`, which only the Webhook uses to check what arrives, takes
+`None`, and n8n can never send it anywhere. `Hermes iMessage plugin secret` takes `Specific Domains`
+with `127.0.0.1`: n8n compares the host and not the port.
+
 **2. The `run_record` Data Table**, in the editor, since n8n's CLI imports workflows and not
-tables. Name it `run_record`, with these five columns and no others:
+tables. Name it `run_record`, with these five columns. n8n gives every table `id`, `createdAt` and
+`updatedAt` of its own, which cannot be removed and hold no text:
 
 | Column | Type |
 |---|---|
@@ -139,10 +145,21 @@ tables. Name it `run_record`, with these five columns and no others:
 Its id is the last part of its address in the browser, after `/datatables/`. Keep it for the
 steps below; it is not a secret, but it stays out of git.
 
-**3. The workflow**, in the editor, node by node: `workflows/building-the-relay.md`.
+**3. The workflow**, imported, then opened and saved once in the editor:
+
+```sh
+n8n/import.sh TABLE_ID
+```
+
+`import.sh` renders the template with your handles and the table's id into a folder `_n8n` can
+read, imports it, and removes every rendered copy whether or not the import worked. It refuses while
+a workflow of that name exists, since two copies would hold one webhook path between them. Open
+`iMessage relay`, check each node against `workflows/building-the-relay.md`, which says what each
+is set to and why, and save: saving makes the editor write each node in its own form, which the
+export then carries into git. The workflow arrives unpublished; leave it so until step 5.
 
 **4. Export it into git.** The first command finds its id. `_n8n` writes the export, and it is
-readable by you through the admin group. Afterwards `git diff` shows only what you meant to change:
+readable by you through the admin group. Afterwards `git diff` shows what changed in the editor:
 
 ```sh
 n8n/n8n-cli.sh list:workflow
@@ -155,19 +172,10 @@ python3 -m unittest discover -s ./tests -p 'test_n8n_workflows.py'
 
 `export.py` refuses, writing nothing, if anything in the result still looks like a handle.
 
-**5. Import the rendered relay**, after deleting the copy you built in the editor. `import.sh`
-refuses while a workflow of that name exists, since two copies would hold one webhook path between
-them:
+**5. Publish it** in the editor: its webhook answers nothing until then.
 
-```sh
-n8n/import.sh TABLE_ID
-```
-
-It removes every rendered copy whether or not the import worked. The workflow arrives unpublished,
-and its webhook answers nothing until you open it in the editor and press **Publish**.
-
-When the handle file changes, the relay's table is out of date until you repeat this step: delete
-the workflow in the editor, import, publish.
+When the handle file changes, the relay's table is out of date until you delete the workflow in the
+editor, run `n8n/import.sh TABLE_ID` again and publish.
 
 **6. Read a run back.** This posts one real text through n8n to the plugin, so Hermes answers it.
 `read -rs` takes the relay secret without showing it, the handle comes from your own file, and both

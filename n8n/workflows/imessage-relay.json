@@ -1,0 +1,405 @@
+{
+  "connections": {
+    "Forward to plugin": {
+      "main": [
+        [
+          {
+            "index": 0,
+            "node": "Record forward",
+            "type": "main"
+          }
+        ],
+        [
+          {
+            "index": 0,
+            "node": "Record failure",
+            "type": "main"
+          }
+        ]
+      ]
+    },
+    "Record drop": {
+      "main": [
+        [
+          {
+            "index": 0,
+            "node": "Insert run record",
+            "type": "main"
+          }
+        ]
+      ]
+    },
+    "Record failure": {
+      "main": [
+        [
+          {
+            "index": 0,
+            "node": "Insert run record",
+            "type": "main"
+          }
+        ]
+      ]
+    },
+    "Record forward": {
+      "main": [
+        [
+          {
+            "index": 0,
+            "node": "Insert run record",
+            "type": "main"
+          }
+        ]
+      ]
+    },
+    "Relay webhook": {
+      "main": [
+        [
+          {
+            "index": 0,
+            "node": "Routing table",
+            "type": "main"
+          }
+        ]
+      ]
+    },
+    "Route by sender": {
+      "main": [
+        [
+          {
+            "index": 0,
+            "node": "Forward to plugin",
+            "type": "main"
+          }
+        ],
+        [
+          {
+            "index": 0,
+            "node": "Record drop",
+            "type": "main"
+          }
+        ]
+      ]
+    },
+    "Routing table": {
+      "main": [
+        [
+          {
+            "index": 0,
+            "node": "Route by sender",
+            "type": "main"
+          }
+        ]
+      ]
+    }
+  },
+  "name": "iMessage relay",
+  "nodes": [
+    {
+      "credentials": {
+        "httpHeaderAuth": {
+          "name": "Shortcuts relay secret"
+        }
+      },
+      "id": "0ec64855-d122-481a-ab73-f288342b9461",
+      "name": "Relay webhook",
+      "parameters": {
+        "authentication": "headerAuth",
+        "httpMethod": "POST",
+        "options": {
+          "ipWhitelist": "127.0.0.1,::1"
+        },
+        "path": "imessage-relay"
+      },
+      "position": [
+        0,
+        0
+      ],
+      "type": "n8n-nodes-base.webhook",
+      "typeVersion": 2.2
+    },
+    {
+      "id": "6487012a-6f59-4e22-9448-8405ed501bf7",
+      "name": "Routing table",
+      "parameters": {
+        "assignments": {
+          "assignments": [
+            {
+              "id": "49d95818-9870-4839-8f54-26cd44a4c85a",
+              "name": "zack_handles",
+              "type": "array",
+              "value": "__ZACK_HANDLES_JSON__"
+            },
+            {
+              "id": "88f3ec24-df2c-43a9-91ff-44d6715717e5",
+              "name": "received_at",
+              "type": "string",
+              "value": "={{ $now.toISO() }}"
+            },
+            {
+              "id": "16826e7c-9709-4fae-bc8b-dd34d90c285d",
+              "name": "started_ms",
+              "type": "number",
+              "value": "={{ $now.toMillis() }}"
+            }
+          ]
+        },
+        "include": "selected",
+        "includeFields": "body",
+        "includeOtherFields": true,
+        "options": {}
+      },
+      "position": [
+        220,
+        0
+      ],
+      "type": "n8n-nodes-base.set",
+      "typeVersion": 3.5
+    },
+    {
+      "id": "e19f6ca8-5b75-4282-8b40-ce9d2a213bbd",
+      "name": "Route by sender",
+      "parameters": {
+        "options": {
+          "fallbackOutput": "extra",
+          "renameFallbackOutput": "dropped"
+        },
+        "rules": {
+          "values": [
+            {
+              "conditions": {
+                "combinator": "and",
+                "conditions": [
+                  {
+                    "id": "65200158-1547-4d73-b001-c87505a68a5b",
+                    "leftValue": "={{ $json.zack_handles.includes(((s) => s.includes('@') ? s.toLowerCase() : ((d) => /^\\d{10}$/.test(d) ? '+1' + d : /^1\\d{10}$/.test(d) ? '+' + d : d)(s.replace(/[\\s().\\-]/g, '')))(String($json.body.sender).trim())) }}",
+                    "operator": {
+                      "name": "filter.operator.true",
+                      "operation": "true",
+                      "singleValue": true,
+                      "type": "boolean"
+                    },
+                    "rightValue": ""
+                  }
+                ],
+                "options": {
+                  "caseSensitive": true,
+                  "leftValue": "",
+                  "typeValidation": "strict",
+                  "version": 4
+                }
+              },
+              "outputKey": "zack",
+              "renameOutput": true
+            }
+          ]
+        }
+      },
+      "position": [
+        440,
+        0
+      ],
+      "type": "n8n-nodes-base.switch",
+      "typeVersion": 3.5
+    },
+    {
+      "credentials": {
+        "httpHeaderAuth": {
+          "name": "Hermes iMessage plugin secret"
+        }
+      },
+      "id": "a972ad93-a0c0-4b22-a77c-94b8f789e24f",
+      "name": "Forward to plugin",
+      "onError": "continueErrorOutput",
+      "parameters": {
+        "authentication": "genericCredentialType",
+        "genericAuthType": "httpHeaderAuth",
+        "jsonBody": "={{ $json.body }}",
+        "method": "POST",
+        "options": {
+          "response": {
+            "response": {
+              "fullResponse": true,
+              "neverError": true
+            }
+          },
+          "timeout": 5000
+        },
+        "sendBody": true,
+        "specifyBody": "json",
+        "url": "http://127.0.0.1:8645/imessage"
+      },
+      "position": [
+        660,
+        -100
+      ],
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.5
+    },
+    {
+      "id": "b09cf10d-c13b-4cd1-acf1-5d4a07dc5381",
+      "name": "Record forward",
+      "parameters": {
+        "assignments": {
+          "assignments": [
+            {
+              "id": "c83e48e0-5ec1-4963-831d-413c1e5e1db5",
+              "name": "route",
+              "type": "string",
+              "value": "zack"
+            },
+            {
+              "id": "61084b4b-710d-485f-a8b0-9bc0f34411e6",
+              "name": "outcome",
+              "type": "string",
+              "value": "={{ ({202: 'accepted', 204: 'dropped_by_plugin', 401: 'secret_refused'})[$json.statusCode] ?? 'plugin_refusing' }}"
+            },
+            {
+              "id": "9aa484b6-8c76-46ba-aaad-b11eda2f92d6",
+              "name": "plugin_status",
+              "type": "number",
+              "value": "={{ $json.statusCode }}"
+            },
+            {
+              "id": "af7f55fb-fbe8-4864-9f5d-9435197a1f69",
+              "name": "received_at",
+              "type": "string",
+              "value": "={{ $('Routing table').first().json.received_at }}"
+            },
+            {
+              "id": "e36eccf4-766f-4450-9b19-11bcec8a3df3",
+              "name": "duration_ms",
+              "type": "number",
+              "value": "={{ $now.toMillis() - $('Routing table').first().json.started_ms }}"
+            }
+          ]
+        },
+        "options": {}
+      },
+      "position": [
+        880,
+        -200
+      ],
+      "type": "n8n-nodes-base.set",
+      "typeVersion": 3.5
+    },
+    {
+      "id": "d016ee50-9576-453a-bfa7-8663320d8acf",
+      "name": "Record failure",
+      "parameters": {
+        "assignments": {
+          "assignments": [
+            {
+              "id": "16791dc6-b168-4d4d-8fd8-54b1eb3910eb",
+              "name": "route",
+              "type": "string",
+              "value": "zack"
+            },
+            {
+              "id": "596385f2-fbf9-4279-8d3b-bdf771fa5ce5",
+              "name": "outcome",
+              "type": "string",
+              "value": "={{ /timeout|TIMEDOUT/.test(String($json.error?.message) + ' ' + String($json.error?.code)) ? 'timeout' : 'plugin_unreachable' }}"
+            },
+            {
+              "id": "f91df663-0251-4eb8-8daf-b2dd4dda6a82",
+              "name": "received_at",
+              "type": "string",
+              "value": "={{ $('Routing table').first().json.received_at }}"
+            },
+            {
+              "id": "8d977747-594f-4d75-b0a2-a85159ebc29e",
+              "name": "duration_ms",
+              "type": "number",
+              "value": "={{ $now.toMillis() - $('Routing table').first().json.started_ms }}"
+            }
+          ]
+        },
+        "options": {}
+      },
+      "position": [
+        880,
+        0
+      ],
+      "type": "n8n-nodes-base.set",
+      "typeVersion": 3.5
+    },
+    {
+      "id": "e264f585-65f5-4851-a733-d861d9f80542",
+      "name": "Record drop",
+      "parameters": {
+        "assignments": {
+          "assignments": [
+            {
+              "id": "40064962-ccea-4a6c-8899-b12759979de8",
+              "name": "route",
+              "type": "string",
+              "value": "dropped"
+            },
+            {
+              "id": "f30ee843-ff98-4fa2-8715-af5514064289",
+              "name": "outcome",
+              "type": "string",
+              "value": "dropped"
+            },
+            {
+              "id": "5874f02a-15c0-44b6-8efe-c4c0d2d415a7",
+              "name": "received_at",
+              "type": "string",
+              "value": "={{ $json.received_at }}"
+            },
+            {
+              "id": "3258b6e1-4fc9-4a1e-99f3-282ed25181af",
+              "name": "duration_ms",
+              "type": "number",
+              "value": "={{ $now.toMillis() - $json.started_ms }}"
+            }
+          ]
+        },
+        "options": {}
+      },
+      "position": [
+        660,
+        200
+      ],
+      "type": "n8n-nodes-base.set",
+      "typeVersion": 3.5
+    },
+    {
+      "id": "b16efc98-a1d7-4df5-8112-68ae3700e80a",
+      "name": "Insert run record",
+      "parameters": {
+        "columns": {
+          "mappingMode": "defineBelow",
+          "matchingColumns": [],
+          "schema": [],
+          "value": {
+            "duration_ms": "={{ $json.duration_ms }}",
+            "outcome": "={{ $json.outcome }}",
+            "plugin_status": "={{ $json.plugin_status }}",
+            "received_at": "={{ $json.received_at }}",
+            "route": "={{ $json.route }}"
+          }
+        },
+        "dataTableId": {
+          "__rl": true,
+          "mode": "list",
+          "value": "__RUN_RECORD_TABLE_ID__"
+        },
+        "options": {}
+      },
+      "position": [
+        1100,
+        0
+      ],
+      "type": "n8n-nodes-base.dataTable",
+      "typeVersion": 1.1
+    }
+  ],
+  "settings": {
+    "executionOrder": "v1",
+    "saveDataErrorExecution": "none",
+    "saveDataSuccessExecution": "none",
+    "saveExecutionProgress": false,
+    "saveManualExecutions": false
+  }
+}
