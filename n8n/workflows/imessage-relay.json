@@ -149,7 +149,7 @@
         "options": {}
       },
       "position": [
-        220,
+        224,
         0
       ],
       "type": "n8n-nodes-base.set",
@@ -195,7 +195,7 @@
         }
       },
       "position": [
-        440,
+        448,
         0
       ],
       "type": "n8n-nodes-base.switch",
@@ -229,8 +229,8 @@
         "url": "http://127.0.0.1:8645/imessage"
       },
       "position": [
-        660,
-        -100
+        672,
+        -96
       ],
       "type": "n8n-nodes-base.httpRequest",
       "typeVersion": 4.5
@@ -277,7 +277,7 @@
       },
       "position": [
         880,
-        -200
+        -208
       ],
       "type": "n8n-nodes-base.set",
       "typeVersion": 3.5
@@ -358,8 +358,8 @@
         "options": {}
       },
       "position": [
-        660,
-        200
+        672,
+        208
       ],
       "type": "n8n-nodes-base.set",
       "typeVersion": 3.5
@@ -369,9 +369,62 @@
       "name": "Insert run record",
       "parameters": {
         "columns": {
+          "attemptToConvertTypes": false,
+          "convertFieldsToString": false,
           "mappingMode": "defineBelow",
           "matchingColumns": [],
-          "schema": [],
+          "schema": [
+            {
+              "defaultMatch": false,
+              "display": true,
+              "displayName": "received_at",
+              "id": "received_at",
+              "readOnly": false,
+              "removed": false,
+              "required": false,
+              "type": "string"
+            },
+            {
+              "defaultMatch": false,
+              "display": true,
+              "displayName": "route",
+              "id": "route",
+              "readOnly": false,
+              "removed": false,
+              "required": false,
+              "type": "string"
+            },
+            {
+              "defaultMatch": false,
+              "display": true,
+              "displayName": "outcome",
+              "id": "outcome",
+              "readOnly": false,
+              "removed": false,
+              "required": false,
+              "type": "string"
+            },
+            {
+              "defaultMatch": false,
+              "display": true,
+              "displayName": "plugin_status",
+              "id": "plugin_status",
+              "readOnly": false,
+              "removed": false,
+              "required": false,
+              "type": "number"
+            },
+            {
+              "defaultMatch": false,
+              "display": true,
+              "displayName": "duration_ms",
+              "id": "duration_ms",
+              "readOnly": false,
+              "removed": false,
+              "required": false,
+              "type": "number"
+            }
+          ],
           "value": {
             "duration_ms": "={{ $json.duration_ms }}",
             "outcome": "={{ $json.outcome }}",
@@ -388,7 +441,7 @@
         "options": {}
       },
       "position": [
-        1100,
+        1104,
         0
       ],
       "type": "n8n-nodes-base.dataTable",
@@ -396,6 +449,7 @@
     }
   ],
   "settings": {
+    "binaryMode": "separate",
     "executionOrder": "v1",
     "saveDataErrorExecution": "none",
     "saveDataSuccessExecution": "none",
