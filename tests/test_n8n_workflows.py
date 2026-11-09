@@ -606,11 +606,18 @@ class RenderTest(ScriptTest):
                 self.assertFalse(self.out.exists())
 
     def test_a_table_id_that_could_not_be_one_is_refused(self):
-        for table_id in ("", "has space", 'quo"te', "../path"):
+        # The table's name was given in place of its id on 2026-11-09, and imported unremarked.
+        for table_id in ("", "has space", 'quo"te', "../path", "run_record", "kQ3xV9mT2bLw7Zp", "kQ3xV9mT2bLw7ZpAb",
+                         "kQ3xV9mT2bLw7Z-A"):
             with self.subTest(table_id):
                 result = self.render(table_id=table_id)
                 self.assert_refused(result)
                 self.assertFalse(self.out.exists())
+
+    def test_a_refused_table_id_says_where_the_id_is(self):
+        result = self.render(table_id="run_record")
+        self.assert_refused(result)
+        self.assertIn("/datatables/", result.stderr)
 
     def test_nothing_it_prints_holds_a_value(self):
         result = self.render()
@@ -733,6 +740,13 @@ class ExportTest(ScriptTest):
         result = self.export(self.exported, self.template_out)
         self.assert_refused(result)
         self.assertFalse(self.template_out.exists())
+
+    def test_a_table_name_given_in_place_of_its_id_is_refused(self):
+        self.write_exported(self.simulated_export())
+        result = self.export(self.exported, self.template_out, table_id="run_record")
+        self.assert_refused(result)
+        self.assertFalse(self.template_out.exists())
+        self.assertIn("/datatables/", result.stderr)
 
     def test_an_export_with_no_table_id_in_it_is_refused(self):
         self.write_exported(self.simulated_export())

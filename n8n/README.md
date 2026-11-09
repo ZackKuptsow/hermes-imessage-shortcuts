@@ -142,8 +142,9 @@ tables. Name it `run_record`, with these five columns. n8n gives every table `id
 | `plugin_status` | Number |
 | `duration_ms` | Number |
 
-Its id is the last part of its address in the browser, after `/datatables/`. Keep it for the
-steps below; it is not a secret, but it stays out of git.
+Its id is the 16 letters and digits at the end of its address in the browser, after `/datatables/`.
+The name `run_record` is not it, and `render.py` and `export.py` refuse anything else. Keep it for
+the steps below; it is not a secret, but it stays out of git.
 
 **3. The workflow**, imported, then opened and saved once in the editor:
 
