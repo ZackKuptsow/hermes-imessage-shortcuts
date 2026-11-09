@@ -36,7 +36,8 @@ import check_relay  # noqa: E402 -- it lives beside the scripts it uses, not in 
 
 plugin_module("handles")
 
-FIXTURE_TEMPLATE = Path(__file__).resolve().parent / "fixtures" / "n8n-relay-template.json"
+# The template check_relay.py itself reads: the relay as n8n's editor exported it.
+RELAY_TEMPLATE = Path(__file__).resolve().parent.parent / "n8n" / "workflows" / "imessage-relay.json"
 RUN_RECORD_TABLE_ID = "kQ3xV9mT2bLw7ZpA"
 STAND_IN_URL = "http://127.0.0.1:49999/imessage"
 PLUGIN_PORT = "8645"
@@ -55,7 +56,7 @@ WEBHOOK_NOT_REGISTERED_STATUS = 404
 
 
 def template() -> dict:
-    return json.loads(FIXTURE_TEMPLATE.read_text(encoding="utf-8"))
+    return json.loads(RELAY_TEMPLATE.read_text(encoding="utf-8"))
 
 
 def nodes_of_type(workflow: dict, node_type: str) -> list[dict]:
