@@ -23,8 +23,12 @@ TABLE_TOKEN = "__RUN_RECORD_TABLE_ID__"
 TOKENS = (HANDLES_TOKEN, TABLE_TOKEN)
 PACKAGE_NAME = "imessage_shortcuts"
 PLUGIN_DIRECTORY = Path(__file__).resolve().parent.parent / "imessage-shortcuts"
-# n8n's ids are short and URL-safe. Anything else is a slip, and would be written into the workflow.
-TABLE_ID_PATTERN = re.compile(r"^[A-Za-z0-9_-]+$")
+# n8n makes a Data Table's id as it makes a workflow's: 16 characters from its NANOID_ALPHABET of
+# digits and letters (@n8n/utils generate-nano-id). Anything else, the table's name first, is a slip
+# that would be written into the workflow and fail only when a run reaches the table.
+TABLE_ID_PATTERN = re.compile(r"^[0-9A-Za-z]{16}$")
+TABLE_ID_HELP = ("the run record table's id is the 16 letters and digits after /datatables/ in the table's "
+                 "address in the editor, not its name")
 
 
 class TemplateError(ValueError):
@@ -60,7 +64,7 @@ def read_handles(handle_file: Path) -> tuple[str, ...]:
 def checked_table_id(table_id: str) -> str:
     """*table_id*, or TemplateError when it could not be one of n8n's ids."""
     if not TABLE_ID_PATTERN.match(table_id):
-        raise TemplateError("the run record table's id is empty or holds characters n8n's ids do not")
+        raise TemplateError(TABLE_ID_HELP)
     return table_id
 
 

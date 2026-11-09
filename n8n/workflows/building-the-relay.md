@@ -1,12 +1,14 @@
-# Building the relay in the editor, once
+# The relay's eight nodes, and building them in the editor
 
-`imessage-relay.json` is authored in n8n's editor and exported, never written by hand: the editor
-is the source of valid node types, versions and parameter shapes. This sheet is what to click.
-It only needs doing again if the relay is rebuilt from nothing; a change to the routing goes
-through an edit and a fresh export. `tests/test_n8n_workflows.py` checks the result, so a slip here
-fails there and is cheap to fix. `../README.md`, "The relay", has the steps before and after this.
+`imessage-relay.json` reaches n8n through `n8n/import.sh` (`../README.md`, "The relay", step 3),
+and n8n's editor saves it before it is exported, so the editor stays the source of valid node
+types, versions and parameter shapes. This sheet says what each node is set to and why: check the
+imported nodes against it, or build them from it if the relay is ever rebuilt in the editor. A
+change to the routing goes through an edit and a fresh export. `tests/test_n8n_workflows.py`
+checks the exported result either way, so a slip fails there and is cheap to fix.
 
-Open `http://127.0.0.1:5678`, make a new workflow, and name it exactly `iMessage relay`.
+To build it by hand, open `http://127.0.0.1:5678`, make a new workflow, and name it exactly
+`iMessage relay`.
 
 A value marked **expression** goes in with the field switched to *Expression* (the `fx` toggle).
 Each expression below is written without the leading `=`, which n8n adds itself.
@@ -46,7 +48,7 @@ The switchboard. Mode `Rules`, with one routing rule:
 - Value 1, **expression**, the whole line:
 
   ```
-  {{ $json.zack_handles.includes(((s) => s.includes('@') ? s.toLowerCase() : ((d) => /^\d{10}$/.test(d) ? '+1' + d : /^1\d{10}$/.test(d) ? '+' + d : d)(s.replace(/[\s().\- ]/g, '')))(String($json.body.sender).trim())) }}
+  {{ $json.zack_handles.includes(((s) => s.includes('@') ? s.toLowerCase() : ((d) => /^\d{10}$/.test(d) ? '+1' + d : /^1\d{10}$/.test(d) ? '+' + d : d)(s.replace(/[\s().\-]/g, '')))(String($json.body.sender).trim())) }}
   ```
 
 - Operator: Boolean, `is true`.
@@ -132,5 +134,5 @@ since a unit test cannot see the plist that sets the default.
 | Save manual executions | `Do not save` |
 | Save execution progress | `Do not save` |
 
-Save the workflow. Do not publish this copy: it holds a token where the handles belong, and it is
-deleted once it has been exported.
+Save the workflow. A copy built by hand holds a token where the handles belong, so do not publish
+it: export it, delete it, and import the result as the README's step 3 does.

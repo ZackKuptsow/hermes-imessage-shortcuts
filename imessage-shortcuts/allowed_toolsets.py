@@ -23,7 +23,7 @@ MCP_SERVERS_KEY = "mcp_servers"
 MEMORY_KEY = "memory"
 MEMORY_PROVIDER_KEY = "provider"
 PLATFORM_TOOLSETS_KEY = "platform_toolsets"
-REFUSAL_HINT = "(smart-home ADR 0035; README, \"What it refuses\")"
+REFUSAL_HINT = "(smart-home ADR 0035; docs/security.md, \"What it refuses\")"
 
 
 class ToolsetsRefusedError(ValueError):
