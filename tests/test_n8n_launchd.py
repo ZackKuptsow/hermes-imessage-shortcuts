@@ -82,7 +82,8 @@ DESIGNED_KEYS = {
 # Absent by design: n8n's 2.x default already excludes Execute Command, and n8n writes its
 # own key to /var/n8n/.n8n/config, readable by _n8n and root alone, never by every user.
 FORBIDDEN_VARIABLES = ("N8N_ENCRYPTION_KEY", "NODES_EXCLUDE")
-RELAY_SECRET_EXAMPLE = "0123456789abcdef" * 4  # the X-Relay-Secret's shape: 64 hex characters
+HEX_DIGITS = "0123456789abcdef"
+RELAY_SECRET_EXAMPLE = HEX_DIGITS * 4  # the X-Relay-Secret's shape: 64 hex characters
 # Hex and URL-safe base64 match whole. The slash is left out so a path never matches, which
 # means a standard base64 secret is caught only when a run between its slashes is that long.
 SECRET_PATTERN = re.compile(rf"[A-Za-z0-9+=_-]{{{inbound.SECRET_MINIMUM_LENGTH},}}")
