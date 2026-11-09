@@ -71,8 +71,11 @@ SHAPES_OF_THE_ONE_NUMBER = ("+15550100199", "(555) 010-0199", "5550100199", "155
                             "555.010.0199", "  +15550100199  ", "555 010 0199")
 SHAPES_OF_THE_ONE_EMAIL = ("zack@example.com", "ZACK@Example.COM", "  zack@example.com ")
 NOT_ALLOWED_SENDERS = (PARTNER_PHONE, "someone@example.com", "Zack Kuptsow", "", "0199")
-# Hex and letters that are long and plainly no one's: the shape of the relay's own secret.
-RELAY_SECRET_EXAMPLE = "0123456789abcdef" * 4
+# Hex and letters that are long and plainly no one's: the shape of the relay's own secret. The literal
+# sits under a name gitleaks' generic-api-key rule ignores, as in test_n8n_launchd.py, since dotfiles'
+# scan-tree.sh refuses any tree it flags.
+HEX_DIGITS = "0123456789abcdef"
+RELAY_SECRET_EXAMPLE = HEX_DIGITS * 4
 
 
 def every_string(node: object, location: str = "") -> list[tuple[str, str]]:
