@@ -249,6 +249,16 @@ python3 n8n/check_relay.py --break ip-allowlist
 python3 n8n/check_relay.py --break routing-table
 ```
 
+Measured on the Mac on 2026-11-09, against n8n 2.45.7: all nine cases held and the run exited 0, with
+the timeout at 5,040 ms. The post of 70,085 bytes was answered 200, reached the stand-in as 70,080
+bytes, and wrote `plugin_refusing` 400, so the webhook passes a body past the plugin's limit on, and
+the plugin's own limit is what refuses it. Each break went red for its own reason: with the wrong
+header and with the IP allowlist, every post carrying the secret was answered 403, wrote no row and
+reached nothing; with the routing table, every route and outcome came out the other way. Those three
+runs were made while the check's table still had `duration_ms` as a String column, which by itself
+failed seven cases of a run with nothing broken. The routing-table run's lines name that failure too,
+but the wrong route and outcome they also name do not depend on it, and the other two wrote no row.
+
 ## Upgrading
 
 First copy the database: a new n8n migrates it on its first start, and n8n does not support
