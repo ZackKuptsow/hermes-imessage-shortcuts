@@ -611,6 +611,12 @@ CREATE TABLE workflow_statistics (id INTEGER PRIMARY KEY, workflowId TEXT, name 
 CREATE TABLE credentials_entity (id TEXT PRIMARY KEY, name TEXT);
 CREATE TABLE shared_credentials (credentialsId TEXT NOT NULL REFERENCES credentials_entity (id) ON DELETE CASCADE, projectId TEXT);
 CREATE TABLE data_table (id TEXT PRIMARY KEY, name TEXT);
+CREATE TABLE data_table_column (id TEXT PRIMARY KEY, name TEXT NOT NULL, type TEXT NOT NULL, "index" INTEGER NOT NULL,
+  dataTableId TEXT NOT NULL REFERENCES data_table (id) ON DELETE CASCADE);
+INSERT INTO data_table_column SELECT table_id || column_name, column_name, column_type, position, table_id FROM
+  (SELECT '{RUN_RECORD_TABLE_ID}' AS table_id UNION SELECT '{REAL_TABLE_ID}') CROSS JOIN (SELECT 'received_at' AS column_name,
+  'string' AS column_type, 0 AS position UNION SELECT 'route', 'string', 1 UNION SELECT 'outcome', 'string', 2
+  UNION SELECT 'plugin_status', 'number', 3 UNION SELECT 'duration_ms', 'number', 4);
 CREATE TABLE data_table_user_{RUN_RECORD_TABLE_ID} (id INTEGER PRIMARY KEY AUTOINCREMENT, received_at TEXT, route TEXT, outcome TEXT, plugin_status REAL, duration_ms REAL);
 CREATE TABLE data_table_user_{REAL_TABLE_ID} (id INTEGER PRIMARY KEY AUTOINCREMENT, received_at TEXT, route TEXT, outcome TEXT, plugin_status REAL, duration_ms REAL);
 INSERT INTO data_table VALUES ('{RUN_RECORD_TABLE_ID}', 'run_record_check'), ('{REAL_TABLE_ID}', 'run_record');

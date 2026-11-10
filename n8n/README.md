@@ -213,7 +213,9 @@ ends, and if a run is cut short, the next one removes the leftovers first. It pr
 handle or body.
 
 Once, in the editor, make a second Data Table with the same five columns as `run_record`, named
-`run_record_check`. The check finds it by name. Then, from the repository's root:
+`run_record_check`, with the same types: three String, then `plugin_status` and `duration_ms`
+Number. The check finds it by name, and refuses to start, naming each difference, if its columns
+are not those five. Then, from the repository's root:
 
 ```sh
 python3 n8n/check_relay.py

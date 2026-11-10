@@ -53,6 +53,10 @@ UNPUBLISH_WAIT_SECONDS = 60.0
 UNPUBLISH_POLL_SECONDS = 1.0
 
 CHECK_TABLE_NAME = "run_record_check"
+# The run record's columns as n8n types them. A duration made as a String column stores each value as
+# text, and every row then fails the check as if the relay were at fault (seen 2026-11-09).
+CHECK_TABLE_COLUMNS = {"duration_ms": "number", "outcome": "string", "plugin_status": "number", "received_at": "string",
+                       "route": "string"}
 CHECK_WORKFLOW_NAME = "iMessage relay check"
 CHECK_WORKFLOW_ID = "relayCheckWrkflw"
 CHECK_WEBHOOK_PATH = "imessage-relay-check"
@@ -549,18 +553,43 @@ class N8nInstance:
             self._as_n8n("/bin/rm", "-rf", directory)
 
 
+def check_table_column_problems(columns: dict[str, str]) -> list[str]:
+    """How *columns*, each name with n8n's type for it, differ from the run record's five."""
+    problems = [f"{name} is missing" for name in sorted(CHECK_TABLE_COLUMNS) if name not in columns]
+    problems += [f"{name} is a {columns[name]} column, and must be a {wanted} one"
+                 for name, wanted in sorted(CHECK_TABLE_COLUMNS.items()) if name in columns and columns[name] != wanted]
+    problems += [f"{name} is not one of the run record's columns" for name in sorted(set(columns) - set(CHECK_TABLE_COLUMNS))]
+    return problems
+
+
 def find_check_table(run: Callable[..., subprocess.CompletedProcess[str]] = subprocess.run, home: str = N8N_HOME,
                      database: str = DATABASE_PATH) -> str:
-    """The id of the `run_record_check` Data Table. Raises CheckError saying how to make it."""
-    sql = f"SELECT id FROM data_table WHERE name = '{CHECK_TABLE_NAME}'"
-    result = run(["sudo", "-u", N8N_USER, SQLITE_PATH, "-readonly", "-cmd", SQLITE_BUSY_WAIT, database, sql],
-                 cwd=home, capture_output=True, text=True, check=False)
-    if result.returncode != 0:
-        raise CheckError(f"sqlite3 could not read n8n's database, exit {result.returncode}")
-    identifiers = result.stdout.split()
+    """The id of the `run_record_check` Data Table, once its columns are the run record's.
+
+    Raises:
+        CheckError: there is not exactly one such table, or its columns differ, saying how to put it right.
+    """
+    def read(sql: str) -> str:
+        result = run(["sudo", "-u", N8N_USER, SQLITE_PATH, "-readonly", "-json", "-cmd", SQLITE_BUSY_WAIT, database, sql],
+                     cwd=home, capture_output=True, text=True, check=False)
+        if result.returncode != 0:
+            raise CheckError(f"sqlite3 could not read n8n's database, exit {result.returncode}")
+        return result.stdout
+
+    found = read(f"SELECT id FROM data_table WHERE name = '{CHECK_TABLE_NAME}'")
+    identifiers = [row["id"] for row in json.loads(found)] if found.strip() else []
     if len(identifiers) != 1:
         raise CheckError(f"found {len(identifiers)} Data Tables named {CHECK_TABLE_NAME}, and the check needs one; n8n/README.md says how to make it")
-    return identifiers[0]
+    identifier = identifiers[0]
+    if not workflow_template.TABLE_ID_PATTERN.match(identifier):
+        raise CheckError(f"the {CHECK_TABLE_NAME} Data Table's id is not one n8n makes")
+    listed = read(f"SELECT name, type FROM data_table_column WHERE dataTableId = '{identifier}'")
+    columns = {row["name"]: row["type"] for row in json.loads(listed)} if listed.strip() else {}
+    problems = check_table_column_problems(columns)
+    if problems:
+        raise CheckError(f"the {CHECK_TABLE_NAME} Data Table's columns are not the run record's: {'; '.join(problems)}. "
+                         "Fix them in the editor; n8n/README.md lists the five")
+    return identifier
 
 
 def interrupt_on_termination() -> None:
