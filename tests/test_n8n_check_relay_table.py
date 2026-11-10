@@ -4,7 +4,7 @@ On 2026-11-09 `run_record_check` was made with `duration_ms` as a String column.
 each duration as text, and every row the relay wrote failed the check as if the relay were wrong.
 So the check reads the table's columns from n8n's `data_table_column` before it imports anything,
 and refuses a table that differs, naming each difference. The database is built from n8n's
-migrations, as in test_n8n_check_relay.py, and really read by sqlite3.
+migrations, as in test_n8n_check_relay_instance.py, and really read by sqlite3.
 """
 
 from __future__ import annotations
@@ -15,7 +15,8 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from test_n8n_check_relay import RUN_RECORD_TABLE_ID, SCHEMA, LocalN8n, check_relay
+from n8n_check_support import RUN_RECORD_TABLE_ID, check_relay
+from test_n8n_check_relay_instance import SCHEMA, LocalN8n
 
 
 class CheckTableColumnsTest(unittest.TestCase):
