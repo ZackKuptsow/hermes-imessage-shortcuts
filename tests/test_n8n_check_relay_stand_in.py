@@ -21,7 +21,8 @@ class StandInTest(unittest.TestCase):
             with urllib.request.urlopen(request, timeout=2) as response:
                 return response.status
         except urllib.error.HTTPError as error:
-            return error.code
+            with error:
+                return error.code
 
     def test_it_answers_202_and_keeps_the_body(self):
         self.assertEqual(self.post(b'{"a": 1}'), check_relay.ACCEPTED_STATUS)

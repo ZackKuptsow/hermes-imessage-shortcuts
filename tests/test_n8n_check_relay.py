@@ -12,6 +12,7 @@ n8n's database are tested beside this file, in test_n8n_check_relay_*.py.
 
 from __future__ import annotations
 
+import gc
 import http.server
 import json
 import os
@@ -21,6 +22,7 @@ import time
 import unittest
 import urllib.error
 import urllib.request
+import warnings
 from dataclasses import dataclass, field
 
 from n8n_check_support import HTTP_REQUEST_TYPE, N8N_DIRECTORY, RUN_RECORD_TABLE_ID, check_relay, nodes_of_type, template
@@ -145,7 +147,8 @@ class FakeN8n:
             with urllib.request.urlopen(request, timeout=FAKE_FORWARD_TIMEOUT_SECONDS) as response:
                 status = response.status
         except urllib.error.HTTPError as error:
-            status = error.code
+            with error:
+                status = error.code
         except TimeoutError:
             self.write_row("zack", "timeout", None)
             return
@@ -430,6 +433,19 @@ class BreakingAGateTest(CheckTest):
         result = run_check(self.fake(), "ip-allowlist")
         self.assertEqual(result.code, check_relay.EXIT_BREAK_UNNOTICED, result.output)
         self.assertIn("nothing noticed", result.output)
+
+
+class PostToWebhookTest(unittest.TestCase):
+    def test_a_refused_post_leaves_nothing_open(self):
+        # urllib hands a refusal back as an HTTPError holding the response; the check makes dozens.
+        fake = FakeN8n()
+        self.addCleanup(fake.stop)
+        with warnings.catch_warnings(record=True) as caught:
+            warnings.simplefilter("always", ResourceWarning)
+            status = check_relay.post_to_webhook(fake.webhook_url, None, b"{}")
+            gc.collect()
+        self.assertEqual(status, WEBHOOK_NOT_REGISTERED_STATUS)
+        self.assertEqual([str(warning.message) for warning in caught if issubclass(warning.category, ResourceWarning)], [])
 
 
 if __name__ == "__main__":

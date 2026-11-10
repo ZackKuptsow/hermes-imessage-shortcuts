@@ -6,12 +6,14 @@ relay's rows beside the check's to show they survive. Only sudo and n8n's CLI ar
 
 from __future__ import annotations
 
+import contextlib
 import json
 import shutil
 import sqlite3
 import subprocess
 import tempfile
 import unittest
+from collections.abc import Iterator
 from pathlib import Path
 
 from n8n_check_support import RUN_RECORD_TABLE_ID, STAND_IN_URL, check_relay, template
@@ -61,6 +63,20 @@ TABLES_THAT_HOLD_THE_REAL_RELAY = ("workflow_entity", "workflow_history", "workf
 CHECK_ID = check_relay.CHECK_WORKFLOW_ID
 
 
+@contextlib.contextmanager
+def open_database(database: Path) -> Iterator[sqlite3.Connection]:
+    """A connection to the scratch database, committed if the block succeeds and closed either way.
+
+    sqlite3's own `with` commits but never closes, and an unclosed connection warns.
+    """
+    connection = sqlite3.connect(database)
+    try:
+        with connection:
+            yield connection
+    finally:
+        connection.close()
+
+
 class LocalN8n:
     """Stands in for sudo and n8n's CLI alone: everything else really runs, on a scratch database."""
 
@@ -85,7 +101,7 @@ class LocalN8n:
             return subprocess.CompletedProcess(arguments, 1, stdout="", stderr="")
         if command.startswith("import:"):
             self.seen_by_cli[command] = Path(arguments[1].removeprefix("--input=")).read_text(encoding="utf-8")
-        with sqlite3.connect(self.database) as connection:
+        with open_database(self.database) as connection:
             if command == "import:credentials":
                 for credential in json.loads(self.seen_by_cli[command]):
                     connection.execute("INSERT INTO credentials_entity VALUES (?, ?)", (credential["id"], credential["name"]))
@@ -122,7 +138,7 @@ class InstanceTest(unittest.TestCase):
         self.scratch = Path(tempfile.mkdtemp())
         self.addCleanup(shutil.rmtree, self.scratch, ignore_errors=True)
         self.database = self.scratch / "database.sqlite"
-        with sqlite3.connect(self.database) as connection:
+        with open_database(self.database) as connection:
             connection.executescript(SCHEMA)
         self.run = LocalN8n(self.database)
         self.instance = self.instance_of(RUN_RECORD_TABLE_ID)
@@ -136,16 +152,16 @@ class InstanceTest(unittest.TestCase):
         self.instance.install(check_relay.build_check_workflow(template(), STAND_IN_URL, RUN_RECORD_TABLE_ID, None), credentials)
 
     def write_row(self, route: str = "zack") -> None:
-        with sqlite3.connect(self.database) as connection:
+        with open_database(self.database) as connection:
             connection.execute(f"INSERT INTO data_table_user_{RUN_RECORD_TABLE_ID} (received_at, route, outcome, plugin_status, duration_ms)"
                                " VALUES ('now', ?, 'accepted', 202, 4)", (route,))
 
     def count(self, table: str) -> int:
-        with sqlite3.connect(self.database) as connection:
+        with open_database(self.database) as connection:
             return connection.execute(f"SELECT COUNT(*) FROM {table}").fetchone()[0]
 
     def real_rows(self) -> dict[str, list[tuple]]:
-        with sqlite3.connect(self.database) as connection:
+        with open_database(self.database) as connection:
             return {table: connection.execute(f"SELECT * FROM {table}").fetchall() for table in TABLES_THAT_HOLD_THE_REAL_RELAY}
 
     def row_counts(self) -> dict[str, int]:
@@ -184,7 +200,7 @@ class InstanceTest(unittest.TestCase):
                               ("credentials_entity", f"('{check_relay.CHECK_RELAY_CREDENTIAL_ID}', 'x')"),
                               (f"data_table_user_{RUN_RECORD_TABLE_ID}", "(1000, 'r', 'z', 'o', 1, 1)")):
             with self.subTest(table):
-                with sqlite3.connect(self.database) as connection:
+                with open_database(self.database) as connection:
                     connection.execute(f"INSERT INTO {table} VALUES {values}")
                 self.assertGreater(self.instance.leftovers(), 0)
                 self.instance.remove_leftovers()
@@ -202,7 +218,7 @@ class InstanceTest(unittest.TestCase):
         self.install()
         before = self.real_rows()
         self.instance.remove_leftovers()
-        with sqlite3.connect(self.database) as connection:
+        with open_database(self.database) as connection:
             for table in ("shared_workflow", "shared_credentials", "workflow_history"):
                 with self.subTest(table):
                     self.assertEqual(connection.execute(f"SELECT * FROM {table}").fetchall(), [row for row in before[table] if CHECK_ID not in row
@@ -235,7 +251,7 @@ class InstanceTest(unittest.TestCase):
 
     def test_a_table_that_is_not_there_fails_the_removal_and_rolls_it_back(self):
         self.install()
-        with sqlite3.connect(self.database) as connection:
+        with open_database(self.database) as connection:
             self.run.daemon_unpublishes(connection)
         before = self.row_counts()
         with self.assertRaises(check_relay.CheckError):
@@ -260,7 +276,7 @@ class InstanceTest(unittest.TestCase):
         def slowly() -> int:
             reads_until_down["left"] -= 1
             if reads_until_down["left"] == 0:
-                with sqlite3.connect(self.database) as connection:
+                with open_database(self.database) as connection:
                     self.run.daemon_unpublishes(connection)
             return real_rows_left()
 
@@ -348,14 +364,14 @@ class InstanceTest(unittest.TestCase):
         self.assertIn("-readonly", self.run.calls[0])
 
     def test_no_check_table_says_how_to_make_one(self):
-        with sqlite3.connect(self.database) as connection:
+        with open_database(self.database) as connection:
             connection.execute("DELETE FROM data_table WHERE name = 'run_record_check'")
         with self.assertRaises(check_relay.CheckError) as raised:
             check_relay.find_check_table(run=self.run, home=str(self.scratch), database=str(self.database))
         self.assertIn("n8n/README.md", str(raised.exception))
 
     def test_two_tables_of_that_name_are_refused_rather_than_guessed_between(self):
-        with sqlite3.connect(self.database) as connection:
+        with open_database(self.database) as connection:
             connection.execute("INSERT INTO data_table VALUES ('anotherTableId00', 'run_record_check')")
         with self.assertRaises(check_relay.CheckError):
             check_relay.find_check_table(run=self.run, home=str(self.scratch), database=str(self.database))

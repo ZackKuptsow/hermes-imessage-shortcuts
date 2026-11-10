@@ -10,13 +10,12 @@ migrations, as in test_n8n_check_relay_instance.py, and really read by sqlite3.
 from __future__ import annotations
 
 import shutil
-import sqlite3
 import tempfile
 import unittest
 from pathlib import Path
 
 from n8n_check_support import RUN_RECORD_TABLE_ID, check_relay
-from test_n8n_check_relay_instance import SCHEMA, LocalN8n
+from test_n8n_check_relay_instance import SCHEMA, LocalN8n, open_database
 
 
 class CheckTableColumnsTest(unittest.TestCase):
@@ -24,12 +23,12 @@ class CheckTableColumnsTest(unittest.TestCase):
         self.scratch = Path(tempfile.mkdtemp())
         self.addCleanup(shutil.rmtree, self.scratch, ignore_errors=True)
         self.database = self.scratch / "database.sqlite"
-        with sqlite3.connect(self.database) as connection:
+        with open_database(self.database) as connection:
             connection.executescript(SCHEMA)
         self.run = LocalN8n(self.database)
 
     def change_columns(self, sql: str, *parameters: object) -> None:
-        with sqlite3.connect(self.database) as connection:
+        with open_database(self.database) as connection:
             connection.execute(sql, parameters)
 
     def find(self) -> str:

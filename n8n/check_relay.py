@@ -281,7 +281,9 @@ def post_to_webhook(url: str, secret: str | None, body: bytes) -> int:
         with opener.open(request, timeout=POST_TIMEOUT_SECONDS) as response:
             return response.status
     except urllib.error.HTTPError as error:
-        return error.code
+        # A refusal arrives holding its response open, and the check is refused dozens of times.
+        with error:
+            return error.code
     except (urllib.error.URLError, TimeoutError):
         return NO_ANSWER_STATUS
 
