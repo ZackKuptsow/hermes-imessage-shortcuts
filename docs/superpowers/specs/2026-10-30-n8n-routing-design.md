@@ -300,8 +300,10 @@ telemetry already off through the plist so first launch makes no outbound call.
 ### Workflows as code, and their tests
 
 The three workflows (`iMessage relay`, `Relay failed`, `Inbound heartbeat`) live as
-templates under `n8n/workflows/` in this repository, authored in the editor and exported,
-never hand-written, then stored canonically (keys sorted, two-space indent). The
+templates under `n8n/workflows/` in this repository, saved in the editor and exported, so the
+editor decides node types, versions and parameter shapes, then stored canonically (keys sorted,
+two-space indent). The relay's first copy was written against the installed n8n's node definitions
+and imported to be saved once in the editor, on Zack's say-so of 2026-11-09. The
 `run_record` Data Table is created once by hand in the editor, since n8n's CLI imports
 workflows and not tables; its id is a template token like the handles. A render script
 fills the tokens from the handle files; an import wrapper renders into a place the n8n user

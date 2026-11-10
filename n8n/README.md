@@ -2,8 +2,8 @@
 
 n8n 2.x from npm, pinned, kept running by a LaunchDaemon as the role account `_n8n`,
 reachable only at `http://127.0.0.1:5678`, with every switch that would send something off
-the Mac turned off. It is the instance the texting relay will run on; nothing is imported
-into it here.
+the Mac turned off. It is the instance the texting relay runs on, from a workflow kept in git
+as a template.
 
 Why its own user: the relay never sends Apple Events, so n8n needs no login session, and as
 `_n8n` it cannot read your home, the Hermes profiles, the login Keychain or the handle files.
@@ -106,6 +106,101 @@ Each is a gate from the design, broken or read the way it fails.
 `/var/n8n/.n8n/config` holds the key that decrypts every credential n8n stores. Without it
 the credentials are lost, though the workflows are not. `sudo cp` it somewhere only you can
 read.
+
+## The relay
+
+`workflows/imessage-relay.json` is the switchboard: a webhook behind a header secret, the sender
+looked up in a routing table, the text forwarded to the plugin unchanged, and one row of metadata
+written to a Data Table. In git it is a template, with the handles and the table's id taken out as
+tokens; `render.py` fills them on the Mac from the plugin's own handle file, so the routing table
+and the allow list cannot disagree, and `export.py` takes them out again. `n8n-cli.sh` runs any n8n
+command as the daemon would see it. Run all of these as yourself from the repository's root: they
+ask for `sudo` when they need it. Each step below happens once, except where it says otherwise.
+
+**1. Two credentials**, in the editor, each of type *Header Auth*. Their names are exact, since the
+template refers to them by name and holds neither secret.
+
+| Credential name | Header name | Value |
+|---|---|---|
+| `Shortcuts relay secret` | `X-Relay-Secret` | a new secret from `openssl rand -hex 32`, kept in your password manager; the Shortcut will send it |
+| `Hermes iMessage plugin secret` | `X-Hermes-Secret` | a copy of `IMESSAGE_SHORTCUTS_SECRET` from `~/.hermes/profiles/imessage/.env` |
+
+Set each one's **Allowed HTTP Request Domains** too. n8n applies it to the HTTP Request and GraphQL
+nodes alone, so `Shortcuts relay secret`, which only the Webhook uses to check what arrives, takes
+`None`, and n8n can never send it anywhere. `Hermes iMessage plugin secret` takes `Specific Domains`
+with `127.0.0.1`: n8n compares the host and not the port.
+
+**2. The `run_record` Data Table**, in the editor, since n8n's CLI imports workflows and not
+tables. Name it `run_record`, with these five columns. n8n gives every table `id`, `createdAt` and
+`updatedAt` of its own, which cannot be removed and hold no text:
+
+| Column | Type |
+|---|---|
+| `received_at` | String |
+| `route` | String |
+| `outcome` | String |
+| `plugin_status` | Number |
+| `duration_ms` | Number |
+
+Its id is the 16 letters and digits at the end of its address in the browser, after `/datatables/`.
+The name `run_record` is not it, and `render.py` and `export.py` refuse anything else. Keep it for
+the steps below; it is not a secret, but it stays out of git.
+
+**3. The workflow**, imported, then opened and saved once in the editor:
+
+```sh
+n8n/import.sh TABLE_ID
+```
+
+`import.sh` renders the template with your handles and the table's id into a folder `_n8n` can
+read, imports it, and removes every rendered copy whether or not the import worked. It refuses while
+a workflow of that name exists, since two copies would hold one webhook path between them. Open
+`iMessage relay`, check each node against `workflows/building-the-relay.md`, which says what each
+is set to and why, and save: saving makes the editor write each node in its own form, which the
+export then carries into git. The workflow arrives unpublished; leave it so until step 5.
+
+**4. Export it into git.** The first command finds its id. `_n8n` writes the export, and it is
+readable by you through the admin group. Afterwards `git diff` shows what changed in the editor:
+
+```sh
+n8n/n8n-cli.sh list:workflow
+n8n/n8n-cli.sh export:workflow --id=WORKFLOW_ID --output=/var/n8n/relay-export.json
+python3 n8n/export.py ~/.hermes/profiles/imessage/data/imessage/zack-handles.txt \
+  /var/n8n/relay-export.json n8n/workflows/imessage-relay.json --run-record-table-id TABLE_ID
+sudo -u _n8n rm /var/n8n/relay-export.json
+python3 -m unittest discover -s ./tests -p 'test_n8n_workflows.py'
+```
+
+`export.py` refuses, writing nothing, if anything in the result still looks like a handle.
+
+**5. Publish it** in the editor: its webhook answers nothing until then.
+
+When the handle file changes, the relay's table is out of date until you delete the workflow in the
+editor, run `n8n/import.sh TABLE_ID` again and publish.
+
+**6. Read a run back.** This posts one real text through n8n to the plugin, so Hermes answers it.
+`read -rs` takes the relay secret without showing it, the handle comes from your own file, and both
+reach `curl` through its standard input, since a command line can be read by anyone on the Mac:
+
+```sh
+read -rs RELAY_SECRET
+SENDER="$(grep -v '^#' ~/.hermes/profiles/imessage/data/imessage/zack-handles.txt | head -1)"
+SENT_AT="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+printf 'header = "X-Relay-Secret: %s"\ndata = "{\\"sender\\":\\"%s\\",\\"sent_at\\":\\"%s\\",\\"text\\":\\"Reply with one word: relay.\\"}"\n' \
+  "$RELAY_SECRET" "$SENDER" "$SENT_AT" \
+  | curl -K - -sS -o /dev/null -w '%{http_code}\n' -H 'Content-Type: application/json' http://127.0.0.1:5678/webhook/imessage-relay
+sudo -u _n8n sqlite3 -readonly /var/n8n/.n8n/database.sqlite \
+  'SELECT received_at, route, outcome, plugin_status, duration_ms FROM data_table_user_TABLE_ID;'
+```
+
+The `curl` prints `200`, since the webhook answers before anything else runs. The row should read
+route `zack`, outcome `accepted`, status `202.0` (Data Table numbers are stored as reals), and the
+reply should reach your phone.
+
+**The outcomes**, a closed list: `accepted` (the plugin's 202), `dropped` (not in the routing table,
+so nothing was posted), `dropped_by_plugin` (its 204), `secret_refused` (its 401), `plugin_refusing`
+(any other status), `plugin_unreachable` (the connection failed), `timeout` (5 seconds ran out). The
+plugin's real status is in `plugin_status`, and there is none for the last two or for `dropped`.
 
 ## Upgrading
 
