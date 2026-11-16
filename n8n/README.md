@@ -259,6 +259,50 @@ runs were made while the check's table still had `duration_ms` as a String colum
 failed seven cases of a run with nothing broken. The routing-table run's lines name that failure too,
 but the wrong route and outcome they also name do not depend on it, and the other two wrote no row.
 
+## The alarms
+
+Three workflows, each a template in `workflows/`:
+
+| Workflow | Template | Alarms on |
+|---|---|---|
+| `iMessage relay` | `imessage-relay.json` | nothing of its own: it writes each run's outcome to `run_record`, and the alarm for `plugin_unreachable`, `plugin_refusing`, `secret_refused` and `timeout` is not built yet (below) |
+| `Relay failed` | `relay-failed.json` | a relay run that fails outright, which n8n hands to the relay's error workflow: outcome `relay_failed` |
+| `Inbound heartbeat` | `inbound-heartbeat.json` | run every morning at 08:00, no `accepted` run from route `zack` in the last 36 hours: outcome `inbound_quiet`. The same run deletes the rows older than 7 days, and no others |
+
+An alarm is a row in `run_record` with route `alarm` and an outcome that names its cause, its
+`received_at` the moment it was raised, and no `plugin_status` or `duration_ms`. The outcome is a
+fixed name and never an error's message, since a message can carry what a node was handed; `Relay
+failed` reads nothing of the failed run at all, and its test refuses a read of anything but the run's
+id. The alarms so far:
+
+```sh
+sudo -u _n8n sqlite3 -readonly /var/n8n/.n8n/database.sqlite \
+  "SELECT received_at, outcome FROM data_table_user_TABLE_ID WHERE route = 'alarm' ORDER BY id;"
+```
+
+**The two numbers to tune** are at the top of the heartbeat, in its `Heartbeat constants` node:
+`quiet_hours`, 36, how long without an accepted run before it alarms, and `keep_days`, 7, how long a
+row is kept. `tests/test_n8n_workflows.py` holds both values too, so a change is made in the two places.
+The heartbeat asks by each row's own `createdAt`, which n8n stamps, rather than by `received_at`, a
+string whose offset changes with daylight saving time.
+
+What n8n 2.45.7 does that decides how these run, read in its installed source on 2026-11-15:
+
+- It hands a failed run to the error workflow even though no run is saved (`hookFunctionsSave` in
+  `execution-lifecycle-hooks.js`), but not a run started by hand in the editor, and only to an error
+  workflow that is published (`loadErrorWorkflowData` in `workflow-execution.service.js`). So `Relay
+  failed` is published like the relay, and is tried with a real post, not the editor's run button.
+- A workflow names its error workflow by that workflow's id, in `settings.errorWorkflow`, not by name.
+- The Schedule Trigger keeps the time of `GENERIC_TIMEZONE`, which the plist leaves unset, so n8n's
+  own default, `America/New_York`, decides when 08:00 is, not the Mac's time zone setting.
+- No node on the closed list writes a line of its own to `n8n.log`, and n8n writes none for a run at
+  `info`; a node that fails is logged at `error`, with its message.
+
+**Not wired yet.** The relay does not name `Relay failed` in its settings; `render.py`, `export.py`
+and `import.sh` handle the relay alone, so neither template can be imported with them; no alarm row
+is written for the relay's four failing outcomes; and no alarm writes a line to the log. Until those
+land, the two templates are checked in git and nowhere else.
+
 ## Upgrading
 
 First copy the database: a new n8n migrates it on its first start, and n8n does not support
