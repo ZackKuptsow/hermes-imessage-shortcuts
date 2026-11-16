@@ -914,5 +914,65 @@ class ExportTest(ScriptTest):
         self.assert_no_value_printed(result)
 
 
+class AlarmScriptTest(ScriptTest):
+    """render.py and export.py on Issue #10's two templates, which hold the table's token and no handle."""
+
+    def rendered_copy(self, path: Path) -> Path:
+        out = self.scratch / f"rendered-{path.name}"
+        result = self.render(template=path, out=out)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        return out
+
+    def test_render_fills_the_table_and_keeps_relay_faileds_id(self):
+        for path, _ in ALARM_TEMPLATES:
+            with self.subTest(path.name):
+                text = self.rendered_copy(path).read_text(encoding="utf-8")
+                self.assertIn(RUN_RECORD_TABLE_ID, text)
+                self.assertNotIn("__", text.replace("__rl", ""))
+                self.assertEqual(json.loads(text).get("id"), json.loads(path.read_text(encoding="utf-8")).get("id"))
+
+    def test_render_refuses_an_alarm_template_without_the_table_token(self):
+        for path, _ in ALARM_TEMPLATES:
+            with self.subTest(path.name):
+                broken = self.scratch / f"broken-{path.name}"
+                broken.write_text(path.read_text(encoding="utf-8").replace(TABLE_TOKEN, "x"), encoding="utf-8")
+                result = self.render(template=broken, out=self.scratch / f"out-{path.name}")
+                self.assert_refused(result)
+                self.assertIn(TABLE_TOKEN, result.stderr)
+
+    def test_a_template_that_takes_texts_in_must_hold_the_routing_table(self):
+        template = json.loads(HEARTBEAT_TEMPLATE.read_text(encoding="utf-8"))
+        template["nodes"].append({"name": "Webhook", "parameters": {}, "type": WEBHOOK_TYPE})
+        broken = self.scratch / "with-a-webhook.json"
+        broken.write_text(json.dumps(template), encoding="utf-8")
+        result = self.render(template=broken)
+        self.assert_refused(result)
+        self.assertIn(HANDLES_TOKEN, result.stderr)
+
+    def test_render_then_export_leaves_each_alarm_template_byte_identical(self):
+        # The heartbeat's instance id goes; Relay failed's fixed one, which the relay names it by, stays.
+        for path, _ in ALARM_TEMPLATES:
+            with self.subTest(path.name):
+                workflow = json.loads(self.rendered_copy(path).read_text(encoding="utf-8"))
+                workflow.update({"active": True, "createdAt": "2026-11-16T10:00:00.000Z", "id": workflow.get("id", "hEaRtBeAtWfId123"),
+                                 "someFutureInstanceKey": "its-value", "versionId": "version-one"})
+                for node in nodes_of_type(workflow, DATA_TABLE_TYPE):
+                    node["parameters"]["dataTableId"].update({"cachedResultName": "run_record",
+                                                              "cachedResultUrl": f"/projects/x/datatables/{RUN_RECORD_TABLE_ID}"})
+                exported, template_out = self.scratch / f"exported-{path.name}", self.scratch / f"template-{path.name}"
+                exported.write_text(json.dumps([workflow]), encoding="utf-8")
+                result = self.export(exported, template_out)
+                self.assertEqual(result.returncode, 0, result.stderr)
+                self.assertEqual(template_out.read_bytes(), path.read_bytes())
+
+    def test_relay_failed_exported_under_another_id_loses_it(self):
+        workflow = json.loads(self.rendered_copy(RELAY_FAILED_TEMPLATE).read_text(encoding="utf-8"))
+        workflow["id"] = "sOmEoThErWfId123"
+        exported, template_out = self.scratch / "exported.json", self.scratch / "template.json"
+        exported.write_text(json.dumps([workflow]), encoding="utf-8")
+        self.assertEqual(self.export(exported, template_out).returncode, 0)
+        self.assertNotIn("id", json.loads(template_out.read_text(encoding="utf-8")))
+
+
 if __name__ == "__main__":
     unittest.main()

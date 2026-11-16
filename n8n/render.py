@@ -4,8 +4,10 @@
 Usage: render.py HANDLE_FILE TEMPLATE OUT --run-record-table-id ID
 
 Reads HANDLE_FILE by the plugin's own rules, so the relay's routing table and the plugin's allow
-list come from one file and cannot disagree. Writes OUT mode 600 and refuses to overwrite it,
-since OUT holds handles. Prints how many handles it wrote, and never one of them.
+list come from one file and cannot disagree. TEMPLATE is any of the three in workflows/: the relay
+holds the handles' token and the table's, the two alarm workflows the table's alone, and each must
+hold what its shape asks for. Writes OUT mode 600 and refuses to overwrite it, since OUT can hold
+handles. Prints how many handles it read, and never one of them.
 """
 
 from __future__ import annotations
@@ -21,7 +23,6 @@ from pathlib import Path
 import workflow_template
 
 OWNER_ONLY_MODE = 0o600
-WEBHOOK_NODE_TYPE = "n8n-nodes-base.webhook"
 
 
 def with_null_credential_ids(workflow: dict) -> dict:
@@ -47,7 +48,7 @@ def with_webhook_ids(workflow: dict) -> dict:
     """
     rendered = copy.deepcopy(workflow)
     for node in rendered.get("nodes", []):
-        if node.get("type") == WEBHOOK_NODE_TYPE:
+        if node.get("type") == workflow_template.WEBHOOK_NODE_TYPE:
             node["webhookId"] = str(uuid.uuid4())
     return rendered
 

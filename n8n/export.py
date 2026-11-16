@@ -5,10 +5,11 @@ Usage: export.py HANDLE_FILE EXPORTED TEMPLATE_OUT --run-record-table-id ID
 
 The inverse of render.py, file to file; neither runs n8n. EXPORTED is the array
 `n8n export:workflow --id=<id> --output=<file>` writes. Keeps the workflow's four portable keys
-and drops the rest by default, so a key a later n8n adds cannot reach git; drops each node's
-webhook id, each credential's id and each resource locator's cached name and URL; puts the tokens
-back; and writes canonically, so render then export leaves the template byte-identical. Refuses,
-writing nothing, while anything in the result still looks like a handle.
+and drops the rest by default, so a key a later n8n adds cannot reach git, with one exception:
+Relay failed's fixed id, which the relay names it by; drops each node's webhook id, each
+credential's id and each resource locator's cached name and URL; puts the tokens back; and writes
+canonically, so render then export leaves the template byte-identical. Works on any of the three
+templates. Refuses, writing nothing, while anything in the result still looks like a handle.
 """
 
 from __future__ import annotations
@@ -50,11 +51,17 @@ def without_locator_caches(node: object) -> object:
 
 
 def portable_workflow(workflow: dict) -> dict:
-    """*workflow* with everything specific to this instance taken out."""
+    """*workflow* with everything specific to this instance taken out.
+
+    Its id goes too, unless it is Relay failed's fixed one, which the relay names it by (Issue #10).
+    """
     missing = [key for key in PORTABLE_KEYS if key not in workflow]
     if missing:
         raise workflow_template.TemplateError(f"the export does not hold {', '.join(missing)}")
-    portable = without_locator_caches({key: workflow[key] for key in PORTABLE_KEYS})
+    kept = {key: workflow[key] for key in PORTABLE_KEYS}
+    if workflow.get("id") == workflow_template.RELAY_FAILED_WORKFLOW_ID:
+        kept["id"] = workflow["id"]
+    portable = without_locator_caches(kept)
     for node in portable["nodes"]:
         for key in INSTANCE_NODE_KEYS:
             node.pop(key, None)
