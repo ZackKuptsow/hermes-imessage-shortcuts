@@ -146,7 +146,7 @@ Its id is the 16 letters and digits at the end of its address in the browser, af
 The name `run_record` is not it, and `render.py` and `export.py` refuse anything else. Keep it for
 the steps below; it is not a secret, but it stays out of git.
 
-**3. The workflow**, imported, then opened and saved once in the editor:
+**3. The workflow**, imported, then opened once in the editor:
 
 ```sh
 n8n/import.sh TABLE_ID
@@ -155,9 +155,9 @@ n8n/import.sh TABLE_ID
 `import.sh` renders the template with your handles and the table's id into a folder `_n8n` can
 read, imports it, and removes every rendered copy whether or not the import worked. It refuses while
 a workflow of that name exists, since two copies would hold one webhook path between them. Open
-`iMessage relay`, check each node against `workflows/building-the-relay.md`, which says what each
-is set to and why, and save: saving makes the editor write each node in its own form, which the
-export then carries into git. The workflow arrives unpublished; leave it so until step 5.
+`iMessage relay` and check each node against `workflows/building-the-relay.md`, which says what
+each is set to and why. n8n 2.45 saves on its own as you edit, so there is no Save to press, and an
+untouched workflow is not written again. The workflow arrives unpublished; leave it so until step 5.
 
 **4. Export it into git.** The first command finds its id. `_n8n` writes the export, and it is
 readable by you through the admin group. Afterwards `git diff` shows what changed in the editor:
@@ -322,7 +322,12 @@ Publish both in the editor, as the relay is: n8n hands a failed run only to an e
 is published, and a Schedule Trigger fires only once published. The relay names `Relay failed` by
 its fixed id, `relayFailedAlarm`, which the template carries and `export.py` keeps; every other
 workflow id is dropped on export as before. Import `Relay failed` before the relay starts failing on
-purpose, or those runs alarm nowhere.
+purpose, or those runs alarm nowhere. Export each back as the relay's step 4 does, with the id
+`n8n-cli.sh list:workflow` gives; `git diff` then shows anything the editor changed.
+
+Installed this way on the Mac on 2026-11-16: `Relay failed`, the relay and the heartbeat each exported
+back byte-identical to its template, so n8n stores what the templates hold. Each was only opened,
+not edited, so this does not show how the editor would write a node it changed.
 
 **The two numbers to tune** are at the top of the heartbeat, in its `Heartbeat constants` node:
 `quiet_hours`, 36, how long without an accepted run before it alarms, and `keep_days`, 7, how long a
@@ -331,10 +336,30 @@ The heartbeat asks by each row's own `createdAt`, which n8n stamps, rather than 
 string whose offset changes with daylight saving time.
 
 **Trying the heartbeat by hand.** Cut-over has not happened, so `run_record` holds only test rows and
-may be emptied (decided on Issue #10). In the editor, with `run_record` emptied, run `Inbound
-heartbeat`: one `inbound_quiet` row and its log line. Add an `accepted` row on route `zack`, run it
-again: nothing. Add a row older than 7 days beside one younger, run it: the older goes, the younger
-stays.
+may be emptied (decided on Issue #10). Run it with the editor's Execute workflow, and read the table
+after each run with:
+
+```sh
+sudo -u _n8n sqlite3 -readonly /var/n8n/.n8n/database.sqlite \
+  "SELECT id, route, outcome, createdAt FROM data_table_user_TABLE_ID ORDER BY id;"
+```
+
+1. With `run_record` emptied in the editor: one `inbound_quiet` row, and its log line. The run stops
+   red on `Log the alarm`, which is the alarm working.
+2. With an `accepted` row on route `zack` added in the editor: no new row, and the run ends green.
+3. With the oldest row backdated 8 days, which the editor cannot do, so it is done in SQLite; n8n
+   keeps `createdAt` as UTC text in this form: the backdated row goes, the younger stays.
+
+```sh
+sudo -u _n8n sqlite3 -cmd ".timeout 5000" /var/n8n/.n8n/database.sqlite \
+  "UPDATE data_table_user_TABLE_ID SET createdAt = strftime('%Y-%m-%d %H:%M:%f', 'now', '-8 days')
+   WHERE id = (SELECT MIN(id) FROM data_table_user_TABLE_ID);"
+```
+
+Run on the Mac on 2026-11-16, as written: the first run wrote `inbound_quiet` at 18:43:31.180 UTC and
+its 2 log lines 10 ms later; the second wrote nothing beside the accepted row; the third deleted the
+alarm row, backdated to 2026-11-08, and kept the accepted row. No other `alarm inbound_quiet` line was
+logged.
 
 **What raises nothing yet.** A heartbeat that fails outright, its Data Table gone or n8n down at
 08:00, raises no alarm: nothing watches the heartbeat until T08. Neither does a relay run n8n never
