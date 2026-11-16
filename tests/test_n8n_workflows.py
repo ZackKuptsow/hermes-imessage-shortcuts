@@ -1,10 +1,11 @@
-"""The relay workflow as a template: what keeps it value-free, and its render and export scripts.
+"""The workflows as templates: what keeps each value-free, and the relay's render and export scripts.
 
-The template is the one workflow file in git, so this suite is the gate between an edit in n8n's
-editor and a repository holding a handle or a secret, or a workflow that could store a text or
-run a command. Every rule is proven by a test that breaks a copy of the template and expects
-that rule to fire. The scripts are driven as the README runs them, file to file, with no n8n
-present, under whichever python3 runs the suite.
+The templates are the workflow files in git, the relay and Issue #10's two alarm workflows, so this
+suite is the gate between an edit in n8n's editor and a repository holding a handle or a secret, or
+a workflow that could store a text or run a command. Every rule, kept in n8n_workflow_rules.py, is
+proven by a test that breaks a copy of a template and expects that rule to fire. The scripts are
+driven as the README runs them, file to file, with no n8n present, under whichever python3 runs the
+suite.
 """
 
 from __future__ import annotations
@@ -17,22 +18,29 @@ import subprocess
 import sys
 import tempfile
 import unittest
+from collections.abc import Callable
 from pathlib import Path
 
 from n8n_workflow_rules import (
+    ALARM_ROUTE,
     CREDENTIAL_TYPE,
     DATA_TABLE_TYPE,
+    ERROR_TRIGGER_TYPE,
     EXPLICIT_SETTINGS,
     HANDLES_TOKEN,
     HTTP_REQUEST_TYPE,
     PLUGIN_CREDENTIAL,
     RELAY_CREDENTIAL,
+    SCHEDULE_TRIGGER_TYPE,
     SET_TYPE,
     SWITCH_TYPE,
     TABLE_TOKEN,
     UUID_PATTERN,
     WEBHOOK_TYPE,
+    assigned_values,
+    inbound_heartbeat_problems,
     nodes_of_type,
+    relay_failed_problems,
     relay_problems,
 )
 from support import PARTNER_PHONE, ZACK_EMAIL, ZACK_PHONE, plugin_module, write_allow_list
@@ -57,8 +65,12 @@ NOT_ALLOWED_SENDERS = (PARTNER_PHONE, "someone@example.com", "Zack Kuptsow", "",
 # scan-tree.sh refuses any tree it flags.
 HEX_DIGITS = "0123456789abcdef"
 RELAY_SECRET_EXAMPLE = HEX_DIGITS * 4
-
-
+# Issue #10's two alarm workflows, the relay's error workflow and the heartbeat.
+RELAY_FAILED_TEMPLATE = REPOSITORY / "n8n" / "workflows" / "relay-failed.json"
+HEARTBEAT_TEMPLATE = REPOSITORY / "n8n" / "workflows" / "inbound-heartbeat.json"
+DESIGNED_QUIET_HOURS = 36
+DESIGNED_KEEP_DAYS = 7
+ALARM_TEMPLATES = ((RELAY_FAILED_TEMPLATE, relay_failed_problems), (HEARTBEAT_TEMPLATE, inbound_heartbeat_problems))
 
 
 def template_under_test() -> dict:
@@ -335,6 +347,194 @@ class OutcomeExpressionTest(unittest.TestCase):
                                 (403, "plugin_refusing"), (503, "plugin_refusing")):
             with self.subTest(status):
                 self.assertEqual(self.evaluate(self.forward, {"statusCode": status}), outcome)
+
+
+def node_named(template: dict, name: str) -> dict:
+    """The node called *name*."""
+    return next(node for node in template["nodes"] if node["name"] == name)
+
+
+Break = Callable[[dict], object]
+
+
+def set_field(node_name: str, field: str, value: object) -> Break:
+    """A break that sets one field of a Set node, adding it if it is not there."""
+    def break_it(template: dict) -> None:
+        assignments = node_named(template, node_name)["parameters"]["assignments"]["assignments"]
+        entry = next((entry for entry in assignments if entry["name"] == field), None)
+        if entry is None:
+            entry = {"id": "added", "name": field, "type": "string", "value": None}
+            assignments.append(entry)
+        entry["value"] = value
+    return break_it
+
+
+def set_parameter(node_name: str, *path_and_value: object) -> Break:
+    """A break that sets one parameter of a node: the keys down to it, then its value."""
+    *path, key, value = path_and_value
+
+    def break_it(template: dict) -> None:
+        parameters = node_named(template, node_name)["parameters"]
+        for step in path:
+            parameters = parameters[step]
+        parameters[key] = value
+    return break_it
+
+
+def replaced(old: str, new: str) -> Break:
+    """A break that replaces text anywhere in the template, as an edit in the editor could."""
+    def break_it(template: dict) -> None:
+        changed = json.loads(json.dumps(template).replace(old, new))
+        template.clear()
+        template.update(changed)
+    return break_it
+
+
+class AlarmTemplateTest(unittest.TestCase):
+    """Issue #10's two templates: `Relay failed`, the relay's error workflow, and `Inbound heartbeat`."""
+
+    def test_each_alarm_template_exists_and_passes_every_rule(self):
+        for path, problems_of in ALARM_TEMPLATES:
+            with self.subTest(path.name):
+                self.assertTrue(path.exists(), f"{path.name} has not been written yet")
+                self.assertEqual(problems_of(json.loads(path.read_text(encoding="utf-8"))), [])
+
+    def test_each_alarm_template_is_stored_canonically(self):
+        for path, _ in ALARM_TEMPLATES:
+            with self.subTest(path.name):
+                text = path.read_text(encoding="utf-8")
+                self.assertEqual(text, json.dumps(json.loads(text), indent=2, sort_keys=True, ensure_ascii=False) + "\n")
+
+    def test_the_heartbeats_two_constants_are_present_with_the_designs_values(self):
+        # The two numbers to tune (n8n/README.md); tuning one is an edit here too.
+        constants = assigned_values(node_named(json.loads(HEARTBEAT_TEMPLATE.read_text(encoding="utf-8")), "Heartbeat constants"))
+        self.assertEqual(constants, {"keep_days": DESIGNED_KEEP_DAYS, "quiet_hours": DESIGNED_QUIET_HOURS})
+
+    def test_each_alarm_is_a_row_on_route_alarm_naming_its_cause(self):
+        for path, outcome in ((RELAY_FAILED_TEMPLATE, "relay_failed"), (HEARTBEAT_TEMPLATE, "inbound_quiet")):
+            with self.subTest(path.name):
+                fields = assigned_values(node_named(json.loads(path.read_text(encoding="utf-8")), "Record alarm"))
+                self.assertEqual((fields["route"], fields["outcome"]), (ALARM_ROUTE, outcome))
+
+
+class AlarmRuleTest(unittest.TestCase):
+    """Each alarm rule, seen to fire on a copy broken in the one way it refuses."""
+
+    def setUp(self):
+        self.templates = {path: json.loads(path.read_text(encoding="utf-8")) for path, _ in ALARM_TEMPLATES}
+        for path, problems_of in ALARM_TEMPLATES:
+            self.assertEqual(problems_of(self.templates[path]), [], "each copy must start clean, or nothing below shows a rule fired")
+
+    def assert_each_refused(self, breaks: list[tuple[str, Break]], paths: tuple[Path, ...] = (RELAY_FAILED_TEMPLATE, HEARTBEAT_TEMPLATE)) -> None:
+        """Each break, made to a fresh copy of each template in *paths*, raises a problem naming its fragment."""
+        for path, problems_of in ALARM_TEMPLATES:
+            for fragment, break_it in breaks if path in paths else ():
+                with self.subTest(template=path.name, fragment=fragment):
+                    broken = copy.deepcopy(self.templates[path])
+                    break_it(broken)
+                    problems = problems_of(broken)
+                    self.assertTrue(any(fragment in problem for problem in problems), f"no problem names {fragment!r}: {problems}")
+
+    def test_what_the_relays_rules_refuse_is_refused_in_both(self):
+        def add_node(node_type: str):
+            return lambda template: template["nodes"].append({"name": "Added", "parameters": {}, "type": node_type})
+
+        def change_setting(key: str, value: object):
+            return lambda template: template["settings"].__setitem__(key, value)
+
+        def add_credential(template: dict) -> None:
+            node_named(template, "Insert alarm row")["credentials"] = {CREDENTIAL_TYPE: {"name": PLUGIN_CREDENTIAL}}
+
+        self.assert_each_refused([
+            *[("off the closed list", add_node(node_type)) for node_type in (
+                "n8n-nodes-base.code", "n8n-nodes-base.executeCommand", HTTP_REQUEST_TYPE, WEBHOOK_TYPE)],
+            *[(key, change_setting(key, value)) for key, value in (
+                ("saveDataErrorExecution", "all"), ("saveDataSuccessExecution", "DEFAULT"), ("saveManualExecutions", True),
+                ("saveExecutionProgress", True))],
+            ("saveManualExecutions", lambda template: template["settings"].pop("saveManualExecutions")),
+            ("phone number", set_field("Record alarm", "received_at", ZACK_PHONE)),
+            ("email address", set_field("Record alarm", "received_at", ZACK_EMAIL)),
+            ("secret", set_field("Record alarm", "received_at", RELAY_SECRET_EXAMPLE)),
+            ("beyond the loopback address", set_field("Record alarm", "received_at", "https://household.example.net/ingest")),
+            ("holds a credential", add_credential),
+            ("holds a literal", set_parameter("Insert alarm row", "options", "password", "literal")),
+            ("reads the text", set_field("Record alarm", "received_at", "={{ $json.body.text }}")),
+            ("beyond passing it through", set_field("Record alarm", "received_at", "={{ $json.body.sent_at }}")),
+            ("whole item", set_field("Record alarm", "received_at", "={{ JSON.stringify($json) }}")),
+            ("run record's five", set_parameter("Insert alarm row", "columns", "value", "note", "={{ $json.note }}")),
+        ])
+
+    def test_an_alarm_is_only_a_fixed_name_on_route_alarm_in_run_record(self):
+        def second_trigger(template: dict) -> None:
+            template["nodes"].append({"name": "Second trigger", "parameters": {}, "type": ERROR_TRIGGER_TYPE})
+            template["nodes"].append({"name": "Third trigger", "parameters": {}, "type": SCHEDULE_TRIGGER_TYPE})
+
+        self.assert_each_refused([
+            ("route other than alarm", set_field("Record alarm", "route", "zack")),
+            ("not a fixed name", set_field("Record alarm", "outcome", "={{ $json.outcome }}")),
+            ("not a fixed name", set_field("Record alarm", "outcome", "Relay failed: plugin answered 503")),
+            (f"the token {TABLE_TOKEN} is missing", replaced(TABLE_TOKEN, RUN_RECORD_TABLE_ID)),
+            ("routing table", set_field("Record alarm", "zack_handles", HANDLES_TOKEN)),
+            ("the one trigger", second_trigger),
+            *[(f"the Data table's {name}", set_parameter("Insert alarm row", *path)) for name, path in (
+                ("update", ("operation", "update")), ("upsert", ("operation", "upsert")), ("rowExists", ("operation", "rowExists")))],
+            ("the Data table's table delete", lambda template: node_named(template, "Insert alarm row")["parameters"].update(
+                {"operation": "delete", "resource": "table"})),
+            ("the Data table's table clear", lambda template: node_named(template, "Insert alarm row")["parameters"].update(
+                {"operation": "clear", "resource": "table"})),
+        ])
+
+    def test_the_error_workflow_reads_nothing_of_the_failed_run_but_its_id(self):
+        self.assert_each_refused([("more of the failed run than its id", set_field("Record alarm", "received_at", expression))
+                                  for expression in ("={{ $json.execution.error.message }}", "={{ $json.execution.lastNodeExecuted }}",
+                                                     "={{ $json.workflow.name }}", "={{ $json['execution']['error'] }}",
+                                                     "={{ $json.execution.url }}", "={{ $json.trigger.error }}",
+                                                     "={{ $('A relay run failed').first().json.execution.error.stack }}")],
+                                 paths=(RELAY_FAILED_TEMPLATE,))
+
+    def test_the_failed_runs_id_may_be_read(self):
+        template = copy.deepcopy(self.templates[RELAY_FAILED_TEMPLATE])
+        set_field("Record alarm", "received_at", "={{ $json.execution.id }}")(template)
+        self.assertEqual(relay_failed_problems(template), [])
+
+    def test_each_question_the_heartbeat_asks_set_otherwise_is_refused(self):
+        def connect(node_name: str, outputs: list[list[str]]):
+            return lambda template: template["connections"].__setitem__(
+                node_name, {"main": [[{"index": 0, "node": target, "type": "main"} for target in output] for output in outputs]})
+
+        week = "={{ $now.minus({ days: $json.keep_days }).toISO() }}"
+        window = "={{ $now.minus({ hours: $json.quiet_hours }).toISO() }}"
+        prune = ("Prune old rows", "filters", "conditions")
+        find = ("Find an accepted run", "filters", "conditions")
+        self.assert_each_refused([
+            ("every morning", set_parameter("Every morning", "rule", "interval", [{"field": "days", "triggerAtHour": 20}])),
+            ("every morning", set_parameter("Every morning", "rule", "interval", [{"field": "hours", "hoursInterval": 1}])),
+            ("two constants", lambda template: node_named(template, "Heartbeat constants")["parameters"]["assignments"]["assignments"].pop()),
+            ("two constants", set_field("Heartbeat constants", "quiet_hours", "36")),
+            ("two constants", set_field("Heartbeat constants", "keep_days", 0)),
+            ("two constants", set_field("Heartbeat constants", "route", "zack")),
+            ("both questions", connect("Heartbeat constants", [["Find an accepted run"]])),
+            *[("older than the days kept", set_parameter(*prune, conditions)) for conditions in (
+                [{"condition": "gt", "keyName": "createdAt", "keyValue": week}],
+                [{"condition": "lt", "keyName": "updatedAt", "keyValue": week}],
+                [{"condition": "lt", "keyName": "createdAt", "keyValue": window}],
+                [{"condition": "lt", "keyName": "createdAt", "keyValue": week}, {"keyName": "route", "keyValue": "zack"}],
+                [])],
+            *[("inside the quiet hours", set_parameter(*find, conditions)) for conditions in (
+                [{"keyName": "route", "keyValue": "zack"}, {"keyName": "outcome", "keyValue": "dropped_by_plugin"},
+                 {"condition": "gt", "keyName": "createdAt", "keyValue": window}],
+                [{"keyName": "outcome", "keyValue": "accepted"}, {"condition": "gt", "keyName": "createdAt", "keyValue": window}],
+                [{"keyName": "route", "keyValue": "zack"}, {"keyName": "outcome", "keyValue": "accepted"}],
+                [{"keyName": "route", "keyValue": "zack"}, {"keyName": "outcome", "keyValue": "accepted"},
+                 {"condition": "gt", "keyName": "createdAt", "keyValue": week}])],
+            ("inside the quiet hours", set_parameter("Find an accepted run", "matchType", "anyCondition")),
+            ("could never alarm", lambda template: node_named(template, "Find an accepted run").pop("alwaysOutputData")),
+            ("whether it found nothing", set_parameter("Quiet too long", "conditions", "conditions", 0, "operator",
+                                                        {"operation": "exists", "singleValue": True, "type": "number"})),
+            ("whether it found nothing", set_parameter("Quiet too long", "conditions", "conditions", 0, "leftValue", "={{ $json.route }}")),
+            ("true output alone", connect("Quiet too long", [[], ["Record alarm"]])),
+            ("true output alone", connect("Quiet too long", [["Record alarm"], ["Record alarm"]])),
+        ], paths=(HEARTBEAT_TEMPLATE,))
 
 
 class ScriptTest(unittest.TestCase):

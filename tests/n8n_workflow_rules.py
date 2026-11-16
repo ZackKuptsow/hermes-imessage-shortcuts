@@ -43,6 +43,23 @@ WHOLE_ITEM_READ_PATTERN = re.compile(r"(?:\$json|\.json)(?!\s*(?:\.|\?\.|\[))|\$
 # The one read of the body the relay may make beyond the sender: passing it through unchanged.
 PASS_THROUGH_BODY = "={{ $json.body }}"
 SENDER_READ = "$json.body.sender"
+# Issue #10's two alarm workflows. Their closed list is the relay's with the two triggers in place of the
+# Webhook and the HTTP Request: nothing posts to an alarm workflow, and none calls the plugin.
+ERROR_TRIGGER_TYPE = "n8n-nodes-base.errorTrigger"
+SCHEDULE_TRIGGER_TYPE = "n8n-nodes-base.scheduleTrigger"
+IF_TYPE = "n8n-nodes-base.if"
+ALARM_NODE_TYPES = (ALLOWED_NODE_TYPES - {WEBHOOK_TYPE, HTTP_REQUEST_TYPE}) | {ERROR_TRIGGER_TYPE, SCHEDULE_TRIGGER_TYPE}
+# Row operations, insert being n8n's default. The table resource, which can delete or clear a whole table, has none here.
+DATA_TABLE_OPERATIONS = frozenset({"insert", "get", "deleteRows"})
+NON_WRITING_OPERATIONS = frozenset({"get", "deleteRows", "rowExists", "rowNotExists"})
+ALARM_ROUTE = "alarm"
+OUTCOME_NAME_PATTERN = re.compile(r"[a-z]+(?:_[a-z]+)*")
+HEARTBEAT_CONSTANT_NAMES = frozenset({"quiet_hours", "keep_days"})
+LAST_MORNING_HOUR = 11
+# The Error Trigger hands over the failed run: its id, address, error and last node, and the workflow's name.
+# The error's message can carry what a node was handed, so the run's id is the one thing that may be read.
+FAILED_RUN_ID_READ = re.compile(r"\$json\.execution\.id\b")
+FAILED_RUN_READ_PATTERN = re.compile(r"\b(?:execution|workflow|trigger)\b")
 
 
 def every_string(node: object, location: str = "") -> list[tuple[str, str]]:
@@ -127,6 +144,8 @@ def text_problems(template: dict) -> list[str]:
         if WHOLE_ITEM_READ_PATTERN.search(string):
             problems.append(f"{location}: reads a whole item, and so the text with it")
     for node in nodes_of_type(template, DATA_TABLE_TYPE):
+        if data_table_operation(node) in NON_WRITING_OPERATIONS:
+            continue
         columns = node.get("parameters", {}).get("columns", {}).get("value", {})
         if set(columns) != RUN_RECORD_COLUMNS:
             problems.append(f"{node['name']}: the columns are not the run record's five")
@@ -170,14 +189,123 @@ def gate_problems(template: dict) -> list[str]:
     return problems
 
 
+def node_type_problems(template: dict, allowed: frozenset[str]) -> list[str]:
+    """Each node whose type is not on *allowed*, the closed list."""
+    return [f"{node.get('name')}: {node.get('type')} is off the closed list" for node in template.get("nodes", [])
+            if node.get("type") not in allowed]
+
+
+def settings_problems(template: dict) -> list[str]:
+    """Each saving setting not written out as the one value the design allows."""
+    settings = template.get("settings", {})
+    return [f"settings: {key} is not {value!r}" for key, value in EXPLICIT_SETTINGS.items()
+            if type(settings.get(key)) is not type(value) or settings.get(key) != value]
+
+
 def relay_problems(template: dict) -> list[str]:
     """Why *template* may not be the relay, or nothing if it may."""
-    problems = [f"{node.get('name')}: {node.get('type')} is off the closed list" for node in template.get("nodes", [])
-                if node.get("type") not in ALLOWED_NODE_TYPES]
-    settings = template.get("settings", {})
-    problems += [f"settings: {key} is not {value!r}" for key, value in EXPLICIT_SETTINGS.items()
-                 if type(settings.get(key)) is not type(value) or settings.get(key) != value]
+    problems = [*node_type_problems(template, ALLOWED_NODE_TYPES), *settings_problems(template)]
     serialised = json.dumps(template)
     problems += [f"the token {token} is missing" for token in (HANDLES_TOKEN, TABLE_TOKEN) if token not in serialised]
     return [*problems, *value_problems(template), *credential_problems(template), *text_problems(template),
             *gate_problems(template)]
+
+
+def data_table_operation(node: dict) -> str:
+    """What a Data table node does, as n8n reads it: a row operation, and insert where none is named."""
+    parameters = node.get("parameters", {})
+    operation = parameters.get("operation", "insert")
+    return operation if parameters.get("resource", "row") == "row" else f"{parameters['resource']} {operation}"
+
+
+def assigned_values(node: dict) -> dict[str, object]:
+    """A Set node's fields, each name with its value."""
+    return {entry.get("name"): entry.get("value") for entry in node.get("parameters", {}).get("assignments", {}).get("assignments", [])}
+
+
+def alarm_problems(template: dict, trigger_type: str) -> list[str]:
+    """Why *template* may not be one of the two alarm workflows, or nothing if it may.
+
+    An alarm is a run record row with route `alarm` and a fixed outcome naming its cause, so it can
+    carry neither a message nor a text.
+    """
+    nodes = template.get("nodes", [])
+    serialised = json.dumps(template)
+    problems = [*node_type_problems(template, ALARM_NODE_TYPES), *settings_problems(template)]
+    if [node.get("type") for node in nodes if node.get("type") in (ERROR_TRIGGER_TYPE, SCHEDULE_TRIGGER_TYPE)] != [trigger_type]:
+        problems.append(f"the one trigger is not a {trigger_type}")
+    problems += [f"the token {TABLE_TOKEN} is missing"] if TABLE_TOKEN not in serialised else []
+    problems += ["holds the routing table, which no alarm reads"] if HANDLES_TOKEN in serialised else []
+    problems += [f"{node.get('name')}: holds a credential" for node in nodes if node.get("credentials")]
+    problems += [f"{node.get('name')}: the Data table's {data_table_operation(node)} is off the closed list"
+                 for node in nodes_of_type(template, DATA_TABLE_TYPE) if data_table_operation(node) not in DATA_TABLE_OPERATIONS]
+    for node in nodes_of_type(template, SET_TYPE):
+        fields = assigned_values(node)
+        if "route" in fields and fields["route"] != ALARM_ROUTE:
+            problems.append(f"{node['name']}: writes a route other than {ALARM_ROUTE}")
+        if "outcome" in fields and not OUTCOME_NAME_PATTERN.fullmatch(str(fields["outcome"])):
+            problems.append(f"{node['name']}: the outcome is not a fixed name")
+    return [*problems, *value_problems(template), *literal_secret_problems(nodes), *text_problems(template)]
+
+
+def failed_run_problems(template: dict) -> list[str]:
+    """Each expression in the error workflow that reads more of the failed run than its id."""
+    return [f"{location}: reads more of the failed run than its id" for location, string in every_string(template.get("nodes", []))
+            if string.startswith("=") and FAILED_RUN_READ_PATTERN.search(FAILED_RUN_ID_READ.sub("", string))]
+
+
+def filter_conditions(node: dict) -> list[tuple[str, str, str]]:
+    """A Data table node's conditions as (column, condition, value), eq where none is named, as n8n reads them."""
+    return [(entry.get("keyName"), entry.get("condition", "eq"), str(entry.get("keyValue", "")))
+            for entry in node.get("parameters", {}).get("filters", {}).get("conditions", [])]
+
+
+def fed_by(template: dict, node_name: object, output: int = 0) -> list[str]:
+    """The names of the nodes one output of *node_name* feeds."""
+    outputs = template.get("connections", {}).get(node_name, {}).get("main", [])
+    return [link.get("node") for link in outputs[output]] if output < len(outputs) else []
+
+
+def heartbeat_problems(template: dict) -> list[str]:
+    """The heartbeat's constants at its top, and the three questions it asks, as Issue #10 sets them."""
+    problems = []
+    by_name = {node.get("name"): node for node in template.get("nodes", [])}
+    trigger = next((node for node in template.get("nodes", []) if node.get("type") == SCHEDULE_TRIGGER_TYPE), {})
+    intervals = trigger.get("parameters", {}).get("rule", {}).get("interval", [])
+    if len(intervals) != 1 or intervals[0].get("field", "days") != "days" or intervals[0].get("triggerAtHour", 0) > LAST_MORNING_HOUR:
+        problems.append("the trigger does not fire once every morning")
+    first = [by_name.get(name, {}) for name in fed_by(template, trigger.get("name"))]
+    constants = assigned_values(first[0]) if len(first) == 1 and first[0].get("type") == SET_TYPE else {}
+    if set(constants) != HEARTBEAT_CONSTANT_NAMES or not all(isinstance(value, int) and value > 0 for value in constants.values()):
+        problems.append("the trigger does not feed a Set holding the two constants, and nothing else")
+    elif set(fed_by(template, first[0].get("name"))) != {"Find an accepted run", "Prune old rows"}:
+        problems.append("the constants do not feed both questions of the table")
+    prune, find = by_name.get("Prune old rows", {}), by_name.get("Find an accepted run", {})
+    if data_table_operation(prune) != "deleteRows" or filter_conditions(prune) != [
+            ("createdAt", "lt", "={{ $now.minus({ days: $json.keep_days }).toISO() }}")]:
+        problems.append("the prune deletes something other than the rows older than the days kept")
+    wanted = [("route", "eq", "zack"), ("outcome", "eq", "accepted"),
+              ("createdAt", "gt", "={{ $now.minus({ hours: $json.quiet_hours }).toISO() }}")]
+    if data_table_operation(find) != "get" or filter_conditions(find) != wanted or find.get("parameters", {}).get("matchType") != "allConditions":
+        problems.append("the find does not ask for an accepted run from zack inside the quiet hours")
+    if find.get("alwaysOutputData") is not True:
+        problems.append("the find hands nothing on when it finds nothing, so it could never alarm")
+    quiet = [node for node in nodes_of_type(template, IF_TYPE) if fed_by(template, find.get("name")) == [node.get("name")]]
+    conditions = quiet[0].get("parameters", {}).get("conditions", {}).get("conditions", []) if quiet else []
+    if len(conditions) != 1 or conditions[0].get("leftValue") != "={{ $json.id }}" or conditions[0].get("operator", {}).get("operation") != "notExists":
+        problems.append("the find is not followed by an If asking whether it found nothing")
+    elif [assigned_values(by_name.get(name, {})).get("route") for name in fed_by(template, quiet[0]["name"])] != [ALARM_ROUTE] \
+            or fed_by(template, quiet[0]["name"], 1):
+        problems.append("the alarm does not hang off the If's true output alone")
+    return problems
+
+
+def relay_failed_problems(template: dict) -> list[str]:
+    """Why *template* may not be `Relay failed`, the relay's error workflow, or nothing if it may."""
+    return [*alarm_problems(template, ERROR_TRIGGER_TYPE), *failed_run_problems(template)]
+
+
+def inbound_heartbeat_problems(template: dict) -> list[str]:
+    """Why *template* may not be `Inbound heartbeat`, or nothing if it may."""
+    return [*alarm_problems(template, SCHEDULE_TRIGGER_TYPE), *heartbeat_problems(template)]
+
