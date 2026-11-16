@@ -37,6 +37,7 @@ plugin_module("handles")
 
 # The template check_relay.py itself reads: the relay as n8n's editor exported it.
 RELAY_TEMPLATE = Path(__file__).resolve().parent.parent / "n8n" / "workflows" / "imessage-relay.json"
+RELAY_FAILED_TEMPLATE = RELAY_TEMPLATE.with_name("relay-failed.json")
 RUN_RECORD_TABLE_ID = "kQ3xV9mT2bLw7ZpA"
 STAND_IN_URL = "http://127.0.0.1:49999/imessage"
 PLUGIN_PORT = "8645"
@@ -50,6 +51,11 @@ CREDENTIAL_TYPE = "httpHeaderAuth"
 def template() -> dict:
     """The relay as n8n's editor exported it, read fresh so no test can change another's copy."""
     return json.loads(RELAY_TEMPLATE.read_text(encoding="utf-8"))
+
+
+def alarm_template() -> dict:
+    """Relay failed, the relay's error workflow, read fresh as template() is."""
+    return json.loads(RELAY_FAILED_TEMPLATE.read_text(encoding="utf-8"))
 
 
 def nodes_of_type(workflow: dict, node_type: str) -> list[dict]:

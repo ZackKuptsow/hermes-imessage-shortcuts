@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import http.client
 import unittest
 import urllib.error
 import urllib.request
@@ -48,6 +49,12 @@ class StandInTest(unittest.TestCase):
         self.stand_in.start()
         self.assertEqual(self.stand_in.url, url)
         self.assertEqual(self.post(b"{}"), check_relay.ACCEPTED_STATUS)
+
+    def test_told_to_answer_garbage_it_answers_nothing_http_can_read_and_keeps_the_body(self):
+        self.stand_in.answers_garbage = True
+        with self.assertRaises(http.client.HTTPException):
+            self.post(b'{"a": 1}')
+        self.assertEqual(self.stand_in.received, [b'{"a": 1}'])
 
 
 if __name__ == "__main__":

@@ -13,6 +13,7 @@ n8n's database are tested beside this file, in test_n8n_check_relay_*.py.
 from __future__ import annotations
 
 import gc
+import http.client
 import http.server
 import json
 import os
@@ -25,7 +26,7 @@ import urllib.request
 import warnings
 from dataclasses import dataclass, field
 
-from n8n_check_support import HTTP_REQUEST_TYPE, N8N_DIRECTORY, RUN_RECORD_TABLE_ID, check_relay, nodes_of_type, template
+from n8n_check_support import HTTP_REQUEST_TYPE, N8N_DIRECTORY, RUN_RECORD_TABLE_ID, alarm_template, check_relay, nodes_of_type, template
 
 FAST = check_relay.Timing(row_wait_seconds=1.0, settle_seconds=0.02, poll_seconds=0.01, slow_answer_seconds=0.3,
                           webhook_wait_seconds=0.3)
@@ -34,6 +35,8 @@ FORBIDDEN_STATUS = 403
 UNAUTHORIZED_STATUS = 401
 RECEIVED_STATUS = 200
 WEBHOOK_NOT_REGISTERED_STATUS = 404
+# The outcomes the relay fails on purpose with, so that n8n hands the run to its error workflow.
+ALARMED_OUTCOMES = ("plugin_unreachable", "plugin_refusing", "secret_refused", "timeout")
 
 
 @dataclass
@@ -57,6 +60,11 @@ class FakeRelay:
     writes_no_received_at: bool = False
     writes_no_duration: bool = False
     forwards_twice: bool = False
+    raises_no_alarms: bool = False
+    alarms_on_every_outcome: bool = False
+    alarms_with_the_wrong_outcome: bool = False
+    logs_no_alarm_line: bool = False
+    alarm_holds_the_status: bool = False
 
 
 class FakeN8n:
@@ -65,6 +73,9 @@ class FakeN8n:
     def __init__(self, breakage: FakeRelay | None = None, webhook_ready_after: int = 0, starting_answers: int = 0):
         self.breakage = breakage or FakeRelay()
         self.rows_written: list[dict] = []
+        self.log_lines: list[str] = []
+        self.error_workflow: str | None = None
+        self.published_alarm_workflow: str | None = None
         self.events: list[str] = []
         self.has_leftovers = False
         self.webhook_ready_after = webhook_ready_after
@@ -123,7 +134,12 @@ class FakeN8n:
             self.respond(handler, UNAUTHORIZED_STATUS if wrong_status else FORBIDDEN_STATUS)
             return
         self.respond(handler, RECEIVED_STATUS)
-        self.route(json.loads(body))
+        document = json.loads(body)
+        if not isinstance(document, dict):
+            # As the real relay's run throws when it can read no sender: no row of its own.
+            self.raise_alarm("relay_failed")
+            return
+        self.route(document)
 
     def respond(self, handler: http.server.BaseHTTPRequestHandler, status: int) -> None:
         handler.send_response(status)
@@ -152,6 +168,10 @@ class FakeN8n:
         except TimeoutError:
             self.write_row("zack", "timeout", None)
             return
+        except http.client.HTTPException:
+            # An answer that is not HTTP, which the relay's request takes for no answer.
+            self.write_row("zack", "plugin_unreachable", None)
+            return
         except urllib.error.URLError as error:
             outcome = "timeout" if isinstance(error.reason, TimeoutError) else "plugin_unreachable"
             self.write_row("zack", outcome, None)
@@ -160,6 +180,25 @@ class FakeN8n:
         self.write_row("zack", outcomes.get(status, "plugin_refusing"), status)
 
     def write_row(self, route: str, outcome: str, status: int | None) -> None:
+        alarmed = outcome in ALARMED_OUTCOMES or (route == "zack" and self.breakage.alarms_on_every_outcome)
+        self.write_relay_row(route, outcome, status)
+        if alarmed:
+            self.raise_alarm(outcome)
+
+    def raise_alarm(self, outcome: str) -> None:
+        """What n8n does with a failed run: hand it to the published workflow the relay names, if any."""
+        if self.breakage.raises_no_alarms or self.error_workflow is None or self.error_workflow != self.published_alarm_workflow:
+            return
+        if self.breakage.alarms_with_the_wrong_outcome:
+            outcome = "relay_failed" if outcome != "relay_failed" else "timeout"
+        status = 503 if self.breakage.alarm_holds_the_status else None
+        self.rows_written.append({"received_at": "2026-11-16T08:00:00.000Z", "route": "alarm", "outcome": outcome,
+                                  "plugin_status": status, "duration_ms": None})
+        if not self.breakage.logs_no_alarm_line:
+            message = f"alarm {outcome}\nError: alarm {outcome}\n    at StopAndError.execute"
+            self.log_lines.append(json.dumps({"level": "error", "message": message, "metadata": {"file": "error-reporter.js"}}))
+
+    def write_relay_row(self, route: str, outcome: str, status: int | None) -> None:
         if self.breakage.writes_no_rows:
             return
         if self.breakage.writes_the_wrong_outcome:
@@ -186,18 +225,32 @@ class FakeN8n:
     def leftovers(self) -> int:
         return 1 if self.has_leftovers else 0
 
+    def log_mark(self) -> int:
+        return len(self.log_lines)
+
+    def log_since(self, mark: int) -> str:
+        return "\n".join(self.log_lines[mark:])
+
+    def wait_until_published(self, workflow_id: str, wait_seconds: float) -> None:
+        self.events.append(f"wait_until_published {workflow_id}")
+        if self.published_alarm_workflow != workflow_id:
+            raise check_relay.CheckError(f"n8n had not published {workflow_id} after {wait_seconds:g}s")
+
     def remove_leftovers(self) -> None:
         self.events.append("remove_leftovers")
         if not self.fails_to_clean:
             self.has_leftovers = False
             self.rows_written.clear()
 
-    def install(self, workflow: dict, credentials: list[dict]) -> None:
+    def install(self, workflows: list[dict], credentials: list[dict]) -> None:
         self.events.append("install")
         if self.fails_to_install:
             raise check_relay.CheckError("the fake refused to install")
         self.has_leftovers = True
+        workflow = next(entry for entry in workflows if entry["id"] == check_relay.CHECK_WORKFLOW_ID)
         self.installed = (workflow, credentials)
+        self.error_workflow = workflow["settings"].get("errorWorkflow")
+        self.published_alarm_workflow = next((entry["id"] for entry in workflows if entry["id"] != check_relay.CHECK_WORKFLOW_ID), None)
         self.webhook_registered = True
         self.relay_secret = next(entry["data"]["value"] for entry in credentials if entry["name"] == check_relay.CHECK_RELAY_CREDENTIAL)
         self.plugin_secret = next(entry["data"]["value"] for entry in credentials if entry["name"] == check_relay.CHECK_PLUGIN_CREDENTIAL)
@@ -217,7 +270,8 @@ class Run:
 
 def run_check(fake: FakeN8n, gate_broken: str | None = None) -> Run:
     lines: list[str] = []
-    code = check_relay.run_check(fake, template(), RUN_RECORD_TABLE_ID, gate_broken, FAST, lines.append, webhook_url=fake.webhook_url)
+    code = check_relay.run_check(fake, (template(), alarm_template()), RUN_RECORD_TABLE_ID, gate_broken, FAST, lines.append,
+                                 webhook_url=fake.webhook_url)
     return Run(code, lines)
 
 
@@ -316,6 +370,83 @@ class BrokenRelayTest(CheckTest):
 
     def test_the_text_reaching_a_row_is_red(self):
         self.assert_red(writes_text_into_a_row=True)
+
+    def test_a_failure_that_raises_no_alarm_is_red(self):
+        self.assert_red(raises_no_alarms=True)
+
+    def test_an_alarm_on_an_outcome_that_is_no_failure_is_red(self):
+        self.assert_red(alarms_on_every_outcome=True)
+
+    def test_an_alarm_naming_the_wrong_cause_is_red(self):
+        self.assert_red(alarms_with_the_wrong_outcome=True)
+
+    def test_an_alarm_with_no_line_in_the_log_is_red(self):
+        self.assert_red(logs_no_alarm_line=True)
+
+    def test_an_alarm_row_holding_a_field_of_the_relays_is_red(self):
+        self.assert_red(alarm_holds_the_status=True)
+
+
+class AlarmCaseTest(CheckTest):
+    """Issue #10's alarms, seen through the check: one row and a log line for each failure, none for the rest."""
+
+    def test_each_failing_outcome_alarms_under_its_own_name_and_the_others_do_not(self):
+        lines = run_check(self.fake()).lines
+        for case in check_relay.relay_cases(FAST):
+            with self.subTest(case.name):
+                line = next(line for line in lines if line.startswith(f"{case.name}: "))
+                self.assertIn("pass", line)
+                if case.expected_alarm:
+                    self.assertIn(f"alarm {case.expected_alarm}; 1 log line", line)
+                else:
+                    self.assertNotIn("alarm", line)
+
+    def test_the_cases_cover_every_alarmed_outcome_each_refusing_status_and_both_ways_a_run_throws(self):
+        cases = check_relay.relay_cases(FAST)
+        alarmed = {case.expected_alarm for case in cases if case.expected_alarm}
+        self.assertEqual(alarmed, {*ALARMED_OUTCOMES, "relay_failed"})
+        quiet = {case.expected_outcome for case in cases if case.expected_route and not case.expected_alarm}
+        self.assertEqual(quiet, {"accepted", "dropped", "dropped_by_plugin"})
+        self.assertEqual({case.answer_status for case in cases if case.expected_outcome == "plugin_refusing"}, {400, 403, 503})
+        self.assertTrue(any(case.answers_garbage for case in cases))
+        self.assertTrue(any(case.posts_unreadable_body and case.expected_route is None for case in cases))
+
+    def test_a_relay_naming_another_error_workflow_raises_no_alarm_and_is_red(self):
+        fake = self.fake()
+        original_install = fake.install
+
+        def install_then_point_elsewhere(workflows: list[dict], credentials: list[dict]) -> None:
+            original_install(workflows, credentials)
+            fake.error_workflow = "somewhereElse123"
+
+        fake.install = install_then_point_elsewhere
+        self.assertEqual(run_check(fake).code, check_relay.EXIT_FAILED)
+
+    def test_an_alarm_workflow_n8n_never_publishes_stops_the_run_before_any_case(self):
+        fake = self.fake()
+        original_install = fake.install
+
+        def install_unpublished(workflows: list[dict], credentials: list[dict]) -> None:
+            original_install(workflows, credentials)
+            fake.published_alarm_workflow = None
+
+        fake.install = install_unpublished
+        result = run_check(fake)
+        self.assertEqual(result.code, check_relay.EXIT_FAILED)
+        self.assertIn(f"had not published {check_relay.CHECK_ALARM_WORKFLOW_ID}", result.output)
+        self.assertFalse(any(line.startswith("no secret: ") for line in result.lines))
+
+
+class AlarmLogLineTest(unittest.TestCase):
+    def test_only_an_error_saying_the_alarms_two_words_counts(self):
+        lines = [json.dumps({"level": "error", "message": "alarm timeout"}),
+                 json.dumps({"level": "error", "message": "alarm timeout\nError: alarm timeout\n    at x"}),
+                 json.dumps({"level": "error", "message": "alarm timeout (execution 12)"}),
+                 json.dumps({"level": "error", "message": "alarm timeouts"}),
+                 json.dumps({"level": "error", "message": "timeout"}),
+                 json.dumps({"level": "info", "message": "alarm timeout"}),
+                 json.dumps(["alarm timeout"]), "alarm timeout", ""]
+        self.assertEqual(check_relay.alarm_log_lines("\n".join(lines), "timeout"), 3)
 
 
 class CleanupTest(CheckTest):
