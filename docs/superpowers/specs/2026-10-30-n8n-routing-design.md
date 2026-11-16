@@ -286,6 +286,7 @@ launchd ignores `.env` files:
 | `N8N_RESTRICT_FILE_ACCESS_TO` | `/var/n8n/.n8n` | with `N8N_BLOCK_FILE_ACCESS_TO_N8N_FILES` at its default `true`, the pair leaves a node no file access anywhere, which is the intent |
 | `N8N_SSRF_PROTECTION_ENABLED`, `N8N_SSRF_ALLOWED_IP_RANGES` | `true`, `127.0.0.1/32` | the LAN refused, the plugin allowed; verified both ways |
 | `N8N_LOG_LEVEL`, `N8N_LOG_OUTPUT`, `N8N_LOG_FILE_LOCATION` | `info`, `file`, `/var/n8n/log/n8n.log` | readable by the admin group so Zack can `tail` it; n8n's webhook logger never prints bodies |
+| `GENERIC_TIMEZONE` | `America/New_York` | the zone n8n's Schedule Trigger keeps, so the heartbeat's 08:00 is the plist's rather than n8n's built-in default; the same value as that default, pinned so an upgrade cannot move it (added 2026-11-16 by Issue #10's decisions) |
 | `NODE_OPTIONS` | `--max-old-space-size=512` | a cap under the budget; measured in the first ticket |
 | `N8N_USER_FOLDER` | `/var/n8n` | n8n appends `.n8n` itself (`getN8nFolder()` in `@n8n/config`), so the data lands in `/var/n8n/.n8n`: SQLite database, config, credentials key, Data Tables; `_n8n` and root alone |
 | `HOME` | `/var/n8n` | launchd sets no `HOME` for a `UserName` job |

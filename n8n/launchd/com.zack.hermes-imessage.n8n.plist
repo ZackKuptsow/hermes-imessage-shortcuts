@@ -26,6 +26,8 @@
 		<string>none</string>
 		<key>EXTERNAL_FRONTEND_HOOKS_URLS</key>
 		<string></string>
+		<key>GENERIC_TIMEZONE</key>
+		<string>America/New_York</string>
 		<key>HOME</key>
 		<string>/var/n8n</string>
 		<key>N8N_BLOCK_ENV_ACCESS_IN_NODE</key>
