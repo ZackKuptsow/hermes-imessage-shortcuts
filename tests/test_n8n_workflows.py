@@ -23,16 +23,21 @@ from pathlib import Path
 
 from n8n_workflow_rules import (
     ALARM_ROUTE,
+    ALARMED_OUTCOMES,
     CREDENTIAL_TYPE,
     DATA_TABLE_TYPE,
     ERROR_TRIGGER_TYPE,
     EXPLICIT_SETTINGS,
+    FAILED_RUN_OUTCOME,
+    HAND_OFF_CONDITION,
     HANDLES_TOKEN,
     HTTP_REQUEST_TYPE,
+    IF_TYPE,
     PLUGIN_CREDENTIAL,
     RELAY_CREDENTIAL,
     SCHEDULE_TRIGGER_TYPE,
     SET_TYPE,
+    STOP_AND_ERROR_TYPE,
     SWITCH_TYPE,
     TABLE_TOKEN,
     UUID_PATTERN,
@@ -260,6 +265,36 @@ class RelayRuleTest(unittest.TestCase):
                 self.assert_refused(fragment)
                 self.template = original
 
+    def test_the_hand_off_to_relay_failed_set_otherwise_is_refused(self):
+        def connect(node_name: str, outputs: list[list[str]]):
+            return lambda: self.template["connections"].__setitem__(
+                node_name, {"main": [[{"index": 0, "node": target, "type": "main"} for target in output] for output in outputs]})
+
+        def stop_parameters(parameters: dict):
+            return lambda: self.node(STOP_AND_ERROR_TYPE).__setitem__("parameters", parameters)
+
+        def condition(value: str):
+            return lambda: self.node(IF_TYPE)["parameters"]["conditions"]["conditions"][0].__setitem__("leftValue", value)
+
+        breaks = [
+            ("not Relay failed's id", lambda: self.template["settings"].pop("errorWorkflow")),
+            ("not Relay failed's id", lambda: self.template["settings"].__setitem__("errorWorkflow", "anotherWorkflow1")),
+            ("four alarmed outcomes", condition(HAND_OFF_CONDITION.replace(", 'timeout'", ""))),
+            ("four alarmed outcomes", condition(HAND_OFF_CONDITION.replace("'secret_refused'", "'dropped_by_plugin'"))),
+            ("four alarmed outcomes", connect("Insert run record", [["Hand to Relay failed"]])),
+            ("true output alone", connect("Outcome to alarm on", [[], ["Hand to Relay failed"]])),
+            ("not the outcome's name", stop_parameters({"errorMessage": "={{ $json.received_at }}"})),
+            ("not the outcome's name", stop_parameters({"errorObject": "={{ $json.outcome }}", "errorType": "errorObject"})),
+            ("one Stop and Error", lambda: self.template["nodes"].append(
+                {"name": "Second stop", "parameters": {"errorMessage": "x"}, "type": STOP_AND_ERROR_TYPE})),
+        ]
+        for fragment, break_it in breaks:
+            with self.subTest(fragment):
+                original = copy.deepcopy(self.template)
+                break_it()
+                self.assert_refused(fragment)
+                self.template = original
+
 
 class SwitchExpressionTest(unittest.TestCase):
     """The Switch's expression and `handles.canonical_handle` must agree on who is who."""
@@ -348,6 +383,26 @@ class OutcomeExpressionTest(unittest.TestCase):
             with self.subTest(status):
                 self.assertEqual(self.evaluate(self.forward, {"statusCode": status}), outcome)
 
+    def test_the_relay_hands_the_four_failing_outcomes_to_relay_failed_and_no_other(self):
+        check = nodes_of_type(template_under_test(), IF_TYPE)[0]["parameters"]["conditions"]["conditions"][0]["leftValue"]
+        expression = check.removeprefix("={{").removesuffix("}}").strip()
+        for outcome in (*ALARMED_OUTCOMES, "accepted", "dropped", "dropped_by_plugin"):
+            with self.subTest(outcome):
+                self.assertIs(self.evaluate(expression, {"outcome": outcome}), outcome in ALARMED_OUTCOMES)
+
+    def test_relay_failed_names_the_outcome_only_when_the_message_is_exactly_one_of_the_four(self):
+        relay_failed = json.loads(RELAY_FAILED_TEMPLATE.read_text(encoding="utf-8"))
+        expression = str(assigned_values(node_named(relay_failed, "Record alarm"))["outcome"]).removeprefix("={{").removesuffix("}}").strip()
+        failed_runs = [*[({"execution": {"error": {"message": outcome}, "id": "12"}}, outcome) for outcome in ALARMED_OUTCOMES],
+                       *[({"execution": {"error": {"message": message}, "id": "12"}}, "relay_failed") for message in (
+                           "Data table with ID 'x' could not be found in this project", "plugin_refusing: hello",
+                           " timeout", "constructor", "")],
+                       ({"execution": {"id": "12"}}, "relay_failed"),
+                       ({"trigger": {"error": {"message": "timeout"}}}, "relay_failed")]
+        for item, outcome in failed_runs:
+            with self.subTest(item=item):
+                self.assertEqual(self.evaluate(expression, item), outcome)
+
 
 def node_named(template: dict, name: str) -> dict:
     """The node called *name*."""
@@ -411,10 +466,15 @@ class AlarmTemplateTest(unittest.TestCase):
         self.assertEqual(constants, {"keep_days": DESIGNED_KEEP_DAYS, "quiet_hours": DESIGNED_QUIET_HOURS})
 
     def test_each_alarm_is_a_row_on_route_alarm_naming_its_cause(self):
-        for path, outcome in ((RELAY_FAILED_TEMPLATE, "relay_failed"), (HEARTBEAT_TEMPLATE, "inbound_quiet")):
+        for path, outcome in ((RELAY_FAILED_TEMPLATE, FAILED_RUN_OUTCOME), (HEARTBEAT_TEMPLATE, "inbound_quiet")):
             with self.subTest(path.name):
                 fields = assigned_values(node_named(json.loads(path.read_text(encoding="utf-8")), "Record alarm"))
                 self.assertEqual((fields["route"], fields["outcome"]), (ALARM_ROUTE, outcome))
+
+    def test_the_relay_names_relay_failed_by_the_id_relay_failed_carries(self):
+        relay_failed = json.loads(RELAY_FAILED_TEMPLATE.read_text(encoding="utf-8"))
+        self.assertEqual(template_under_test()["settings"]["errorWorkflow"], relay_failed["id"])
+        self.assertRegex(relay_failed["id"], r"^[0-9A-Za-z]{16}$", "n8n's ids are 16 letters and digits")
 
 
 class AlarmRuleTest(unittest.TestCase):
@@ -496,6 +556,30 @@ class AlarmRuleTest(unittest.TestCase):
         template = copy.deepcopy(self.templates[RELAY_FAILED_TEMPLATE])
         set_field("Record alarm", "received_at", "={{ $json.execution.id }}")(template)
         self.assertEqual(relay_failed_problems(template), [])
+
+    def test_each_alarm_row_is_followed_by_its_log_line_and_nothing_else_fails(self):
+        def drop_log_line(template: dict) -> None:
+            template["nodes"].remove(node_named(template, "Log the alarm"))
+            template["connections"].pop("Insert alarm row")
+
+        self.assert_each_refused([
+            ("not followed by a Stop and Error", drop_log_line),
+            ("not followed by a Stop and Error", lambda template: template["connections"]["Record alarm"]["main"][0][0].__setitem__(
+                "node", "Log the alarm")),
+            ("two words", set_parameter("Log the alarm", "errorMessage", "alarm")),
+            ("two words", set_parameter("Log the alarm", "errorMessage", "={{ 'alarm ' + $json.execution.error.message }}")),
+            ("two words", lambda template: node_named(template, "Log the alarm")["parameters"].update(
+                {"errorObject": "={{ $json }}", "errorType": "errorObject"})),
+        ])
+
+    def test_relay_failed_carries_its_id_and_names_its_outcome_from_the_four_alone(self):
+        self.assert_each_refused([
+            ("fixed id", lambda template: template.pop("id")),
+            ("fixed id", lambda template: template.__setitem__("id", "aDifferentId1234")),
+            ("matched against the four alarmed names", set_field("Record alarm", "outcome", "relay_failed")),
+            ("matched against the four alarmed names", set_field("Record alarm", "outcome", FAILED_RUN_OUTCOME.replace(
+                ", 'timeout'", ""))),
+        ], paths=(RELAY_FAILED_TEMPLATE,))
 
     def test_each_question_the_heartbeat_asks_set_otherwise_is_refused(self):
         def connect(node_name: str, outputs: list[list[str]]):

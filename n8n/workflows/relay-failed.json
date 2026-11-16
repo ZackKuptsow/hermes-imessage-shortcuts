@@ -11,6 +11,17 @@
         ]
       ]
     },
+    "Insert alarm row": {
+      "main": [
+        [
+          {
+            "index": 0,
+            "node": "Log the alarm",
+            "type": "main"
+          }
+        ]
+      ]
+    },
     "Record alarm": {
       "main": [
         [
@@ -23,6 +34,7 @@
       ]
     }
   },
+  "id": "relayFailedAlarm",
   "name": "Relay failed",
   "nodes": [
     {
@@ -52,7 +64,7 @@
               "id": "720b9977-1770-4d5e-ac32-f54385c80643",
               "name": "outcome",
               "type": "string",
-              "value": "relay_failed"
+              "value": "={{ ['plugin_unreachable', 'plugin_refusing', 'secret_refused', 'timeout'].includes($json.execution?.error?.message) ? $json.execution.error.message : 'relay_failed' }}"
             },
             {
               "id": "4bcbabdb-4653-40dd-b931-a1bd077b9b8d",
@@ -153,6 +165,19 @@
       ],
       "type": "n8n-nodes-base.dataTable",
       "typeVersion": 1.1
+    },
+    {
+      "id": "2abffd0f-c347-4fbf-a7eb-dc38f12ef488",
+      "name": "Log the alarm",
+      "parameters": {
+        "errorMessage": "={{ 'alarm ' + $json.outcome }}"
+      },
+      "position": [
+        896,
+        0
+      ],
+      "type": "n8n-nodes-base.stopAndError",
+      "typeVersion": 1
     }
   ],
   "settings": {

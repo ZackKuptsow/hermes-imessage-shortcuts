@@ -19,9 +19,9 @@ DATA_TABLE_TYPE = "n8n-nodes-base.dataTable"
 SET_TYPE = "n8n-nodes-base.set"
 SWITCH_TYPE = "n8n-nodes-base.switch"
 CREDENTIAL_TYPE = "httpHeaderAuth"
-# The closed list from issue #8. Anything else, Code and Execute Command first, fails.
+# The closed list from issue #8, with Stop and Error added by Issue #10. Anything else, Code and Execute Command first, fails.
 ALLOWED_NODE_TYPES = frozenset({WEBHOOK_TYPE, SET_TYPE, SWITCH_TYPE, "n8n-nodes-base.if", HTTP_REQUEST_TYPE,
-                                DATA_TABLE_TYPE, "n8n-nodes-base.noOp"})
+                                DATA_TABLE_TYPE, "n8n-nodes-base.noOp", "n8n-nodes-base.stopAndError"})
 EXPLICIT_SETTINGS = {"saveDataErrorExecution": "none", "saveDataSuccessExecution": "none",
                      "saveExecutionProgress": False, "saveManualExecutions": False}
 RUN_RECORD_COLUMNS = frozenset({"received_at", "route", "outcome", "plugin_status", "duration_ms"})
@@ -57,9 +57,22 @@ OUTCOME_NAME_PATTERN = re.compile(r"[a-z]+(?:_[a-z]+)*")
 HEARTBEAT_CONSTANT_NAMES = frozenset({"quiet_hours", "keep_days"})
 LAST_MORNING_HOUR = 11
 # The Error Trigger hands over the failed run: its id, address, error and last node, and the workflow's name.
-# The error's message can carry what a node was handed, so the run's id is the one thing that may be read.
+# The error's message can carry what a node was handed, so the run's id is the one thing that may be read,
+# apart from the message matched whole against the four names below.
 FAILED_RUN_ID_READ = re.compile(r"\$json\.execution\.id\b")
 FAILED_RUN_READ_PATTERN = re.compile(r"\b(?:execution|workflow|trigger)\b")
+# Decided 2026-11-16 (Issue #10's comment): the relay fails on purpose, after its run record, with the name of
+# one of these four outcomes, and Relay failed, which the relay names by this fixed id, alarms on that name.
+# Every alarm row is followed by a Stop and Error, the one way n8n 2.45.7 lets a workflow put a line in its log.
+STOP_AND_ERROR_TYPE = "n8n-nodes-base.stopAndError"
+RELAY_FAILED_WORKFLOW_ID = "relayFailedAlarm"
+ALARMED_OUTCOMES = ("plugin_unreachable", "plugin_refusing", "secret_refused", "timeout")
+ALARMED_OUTCOMES_LIST = "[" + ", ".join(f"'{outcome}'" for outcome in ALARMED_OUTCOMES) + "]"
+HAND_OFF_CONDITION = f"={{{{ {ALARMED_OUTCOMES_LIST}.includes($json.outcome) }}}}"
+HAND_OFF_MESSAGE = "={{ $json.outcome }}"
+FAILED_RUN_OUTCOME = (f"={{{{ {ALARMED_OUTCOMES_LIST}.includes($json.execution?.error?.message) "
+                      "? $json.execution.error.message : 'relay_failed' }}")
+ALARM_LOG_MESSAGE = "={{ 'alarm ' + $json.outcome }}"
 
 
 def every_string(node: object, location: str = "") -> list[tuple[str, str]]:
@@ -208,7 +221,36 @@ def relay_problems(template: dict) -> list[str]:
     serialised = json.dumps(template)
     problems += [f"the token {token} is missing" for token in (HANDLES_TOKEN, TABLE_TOKEN) if token not in serialised]
     return [*problems, *value_problems(template), *credential_problems(template), *text_problems(template),
-            *gate_problems(template)]
+            *gate_problems(template), *hand_off_problems(template)]
+
+
+def hand_off_problems(template: dict) -> list[str]:
+    """The relay's one change from Issue #10: it names Relay failed, and after its run record it fails on
+    purpose with the outcome's name, for the four alarmed outcomes and no other."""
+    problems = []
+    if template.get("settings", {}).get("errorWorkflow") != RELAY_FAILED_WORKFLOW_ID:
+        problems.append("settings: the error workflow is not Relay failed's id")
+    stops = nodes_of_type(template, STOP_AND_ERROR_TYPE)
+    inserts = [node for node in nodes_of_type(template, DATA_TABLE_TYPE) if data_table_operation(node) == "insert"]
+    if len(stops) != 1 or len(inserts) != 1:
+        return [*problems, f"expected one run record insert and one Stop and Error, found {len(inserts)} and {len(stops)}"]
+    checks = [node for node in nodes_of_type(template, IF_TYPE) if fed_by(template, inserts[0].get("name")) == [node.get("name")]]
+    conditions = checks[0].get("parameters", {}).get("conditions", {}).get("conditions", []) if checks else []
+    if len(conditions) != 1 or conditions[0].get("leftValue") != HAND_OFF_CONDITION \
+            or conditions[0].get("operator", {}).get("operation") != "true":
+        problems.append("the run record is not followed by an If on the four alarmed outcomes")
+    elif fed_by(template, checks[0]["name"]) != [stops[0].get("name")] or fed_by(template, checks[0]["name"], 1) \
+            or feeding(template, stops[0].get("name")) != [checks[0]["name"]]:
+        problems.append("the Stop and Error does not hang off that If's true output alone")
+    if stop_message(stops[0]) != HAND_OFF_MESSAGE:
+        problems.append("the Stop and Error's message is not the outcome's name")
+    return problems
+
+
+def stop_message(node: dict) -> object:
+    """What a Stop and Error node throws, or None when it throws an error object rather than a message."""
+    parameters = node.get("parameters", {})
+    return parameters.get("errorMessage") if parameters.get("errorType", "errorMessage") == "errorMessage" else None
 
 
 def data_table_operation(node: dict) -> str:
@@ -223,11 +265,11 @@ def assigned_values(node: dict) -> dict[str, object]:
     return {entry.get("name"): entry.get("value") for entry in node.get("parameters", {}).get("assignments", {}).get("assignments", [])}
 
 
-def alarm_problems(template: dict, trigger_type: str) -> list[str]:
+def alarm_problems(template: dict, trigger_type: str, outcome_expressions: frozenset[str] = frozenset()) -> list[str]:
     """Why *template* may not be one of the two alarm workflows, or nothing if it may.
 
-    An alarm is a run record row with route `alarm` and a fixed outcome naming its cause, so it can
-    carry neither a message nor a text.
+    An alarm is a run record row with route `alarm` and an outcome naming its cause, either a fixed name or
+    one of *outcome_expressions*, so it can carry neither a message nor a text. A line in n8n's log follows it.
     """
     nodes = template.get("nodes", [])
     serialised = json.dumps(template)
@@ -243,15 +285,30 @@ def alarm_problems(template: dict, trigger_type: str) -> list[str]:
         fields = assigned_values(node)
         if "route" in fields and fields["route"] != ALARM_ROUTE:
             problems.append(f"{node['name']}: writes a route other than {ALARM_ROUTE}")
-        if "outcome" in fields and not OUTCOME_NAME_PATTERN.fullmatch(str(fields["outcome"])):
+        if "outcome" in fields and fields["outcome"] not in outcome_expressions and not OUTCOME_NAME_PATTERN.fullmatch(str(fields["outcome"])):
             problems.append(f"{node['name']}: the outcome is not a fixed name")
-    return [*problems, *value_problems(template), *literal_secret_problems(nodes), *text_problems(template)]
+    return [*problems, *value_problems(template), *literal_secret_problems(nodes), *text_problems(template),
+            *log_line_problems(template)]
+
+
+def log_line_problems(template: dict) -> list[str]:
+    """Each alarm row is followed by the line n8n logs for it: a Stop and Error saying `alarm <outcome>`, and
+    no other Stop and Error anywhere."""
+    inserts = [node for node in nodes_of_type(template, DATA_TABLE_TYPE) if data_table_operation(node) == "insert"]
+    stops = nodes_of_type(template, STOP_AND_ERROR_TYPE)
+    problems = []
+    if sorted(tuple(fed_by(template, node.get("name"))) for node in inserts) != sorted((node.get("name"),) for node in stops) \
+            or sorted(name for node in stops for name in feeding(template, node.get("name"))) != sorted(node.get("name") for node in inserts):
+        problems.append("an alarm row is not followed by a Stop and Error alone, or a Stop and Error follows something else")
+    problems += [f"{node.get('name')}: does not log the alarm's two words" for node in stops if stop_message(node) != ALARM_LOG_MESSAGE]
+    return problems
 
 
 def failed_run_problems(template: dict) -> list[str]:
-    """Each expression in the error workflow that reads more of the failed run than its id."""
+    """Each expression in the error workflow that reads more of the failed run than its id, the one lookup of its
+    message against the four alarmed names apart."""
     return [f"{location}: reads more of the failed run than its id" for location, string in every_string(template.get("nodes", []))
-            if string.startswith("=") and FAILED_RUN_READ_PATTERN.search(FAILED_RUN_ID_READ.sub("", string))]
+            if string.startswith("=") and string != FAILED_RUN_OUTCOME and FAILED_RUN_READ_PATTERN.search(FAILED_RUN_ID_READ.sub("", string))]
 
 
 def filter_conditions(node: dict) -> list[tuple[str, str, str]]:
@@ -264,6 +321,12 @@ def fed_by(template: dict, node_name: object, output: int = 0) -> list[str]:
     """The names of the nodes one output of *node_name* feeds."""
     outputs = template.get("connections", {}).get(node_name, {}).get("main", [])
     return [link.get("node") for link in outputs[output]] if output < len(outputs) else []
+
+
+def feeding(template: dict, node_name: object) -> list[str]:
+    """The names of the nodes any output of which feeds *node_name*, once for each link."""
+    return sorted(source for source, outputs in template.get("connections", {}).items()
+                  for output in outputs.get("main", []) for link in output if link.get("node") == node_name)
 
 
 def heartbeat_problems(template: dict) -> list[str]:
@@ -302,7 +365,12 @@ def heartbeat_problems(template: dict) -> list[str]:
 
 def relay_failed_problems(template: dict) -> list[str]:
     """Why *template* may not be `Relay failed`, the relay's error workflow, or nothing if it may."""
-    return [*alarm_problems(template, ERROR_TRIGGER_TYPE), *failed_run_problems(template)]
+    problems = [*alarm_problems(template, ERROR_TRIGGER_TYPE, frozenset({FAILED_RUN_OUTCOME})), *failed_run_problems(template)]
+    if template.get("id") != RELAY_FAILED_WORKFLOW_ID:
+        problems.append("does not carry the fixed id the relay names it by")
+    if [assigned_values(node).get("outcome") for node in nodes_of_type(template, SET_TYPE)] != [FAILED_RUN_OUTCOME]:
+        problems.append("the alarm's outcome is not the failed run's message matched against the four alarmed names")
+    return problems
 
 
 def inbound_heartbeat_problems(template: dict) -> list[str]:

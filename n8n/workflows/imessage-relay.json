@@ -18,6 +18,28 @@
         ]
       ]
     },
+    "Insert run record": {
+      "main": [
+        [
+          {
+            "index": 0,
+            "node": "Outcome to alarm on",
+            "type": "main"
+          }
+        ]
+      ]
+    },
+    "Outcome to alarm on": {
+      "main": [
+        [
+          {
+            "index": 0,
+            "node": "Hand to Relay failed",
+            "type": "main"
+          }
+        ]
+      ]
+    },
     "Record drop": {
       "main": [
         [
@@ -446,10 +468,58 @@
       ],
       "type": "n8n-nodes-base.dataTable",
       "typeVersion": 1.1
+    },
+    {
+      "id": "32fdb1eb-fcfe-4ca1-a24b-52c71cba6c7a",
+      "name": "Outcome to alarm on",
+      "parameters": {
+        "conditions": {
+          "combinator": "and",
+          "conditions": [
+            {
+              "id": "f7bee6e5-9973-44f9-a090-b857ec4c8e65",
+              "leftValue": "={{ ['plugin_unreachable', 'plugin_refusing', 'secret_refused', 'timeout'].includes($json.outcome) }}",
+              "operator": {
+                "operation": "true",
+                "singleValue": true,
+                "type": "boolean"
+              },
+              "rightValue": ""
+            }
+          ],
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "strict",
+            "version": 4
+          }
+        },
+        "options": {}
+      },
+      "position": [
+        1328,
+        0
+      ],
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.4
+    },
+    {
+      "id": "9f183223-7530-402d-a836-f25fc01367c3",
+      "name": "Hand to Relay failed",
+      "parameters": {
+        "errorMessage": "={{ $json.outcome }}"
+      },
+      "position": [
+        1552,
+        -96
+      ],
+      "type": "n8n-nodes-base.stopAndError",
+      "typeVersion": 1
     }
   ],
   "settings": {
     "binaryMode": "separate",
+    "errorWorkflow": "relayFailedAlarm",
     "executionOrder": "v1",
     "saveDataErrorExecution": "none",
     "saveDataSuccessExecution": "none",
