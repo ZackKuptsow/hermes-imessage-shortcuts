@@ -263,6 +263,18 @@ python3 n8n/check_relay.py --break ip-allowlist
 python3 n8n/check_relay.py --break routing-table
 ```
 
+Measured on the Mac on 2026-11-16, against n8n 2.45.7, with Issue #10's alarms: all 14 cases held and
+the run exited 0, the timeout at 5,023 ms. Every alarm case found its one alarm row and 2 log lines;
+`accepted`, `dropped`, `dropped_by_plugin` and the body with no sender raised none; garbage from the
+plugin came out `plugin_unreachable` and alarmed; the table-gone copy wrote no row and alarmed
+`relay_failed`. The over-long post now alarms `plugin_refusing` too, as its 400 should. The three
+breaks each went red and exited 1: with the wrong header and with the IP allowlist, 2 of 14 held, every
+post carrying the secret answered 403 with no row, no alarm and nothing forwarded; with the routing
+table, 3 of 14 held, every route and outcome came out the other way and no alarm was raised but the
+table-gone copy's, which still forwarded to the stand-in and so failed. An earlier run that morning
+held 12 of 13: a `null` body, expected to make the relay throw, was dropped instead, which is why the
+catch-all is now seen through the table-gone copy.
+
 Measured on the Mac on 2026-11-09, against n8n 2.45.7: all nine cases held and the run exited 0, with
 the timeout at 5,040 ms. The post of 70,085 bytes was answered 200, reached the stand-in as 70,080
 bytes, and wrote `plugin_refusing` 400, so the webhook passes a body past the plugin's limit on, and
