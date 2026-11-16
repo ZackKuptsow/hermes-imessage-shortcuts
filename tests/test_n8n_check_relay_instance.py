@@ -62,6 +62,7 @@ TABLES_THAT_HOLD_THE_REAL_RELAY = ("workflow_entity", "workflow_history", "workf
                                    f"data_table_user_{REAL_TABLE_ID}")
 CHECK_ID = check_relay.CHECK_WORKFLOW_ID
 ALARM_ID = check_relay.CHECK_ALARM_WORKFLOW_ID
+TABLE_GONE_ID = check_relay.CHECK_TABLE_GONE_WORKFLOW_ID
 
 
 @contextlib.contextmanager
@@ -88,6 +89,7 @@ class LocalN8n:
         self.daemon_publishes_workflows = True
         self.failing_command: str | None = None
         self.seen_by_cli: dict[str, str] = {}
+        self.workflow_ids_imported: list[str] = []
 
     def __call__(self, arguments: list[str], **options: object) -> subprocess.CompletedProcess[str]:
         self.calls.append(list(arguments))
@@ -110,6 +112,7 @@ class LocalN8n:
                     connection.execute("INSERT INTO shared_credentials VALUES (?, 'project')", (credential["id"],))
             elif command == "import:workflow":
                 workflow = json.loads(self.seen_by_cli[command])
+                self.workflow_ids_imported.append(workflow["id"])
                 connection.execute("INSERT INTO workflow_entity VALUES (?, ?, NULL)", (workflow["id"], workflow["name"]))
                 connection.execute("INSERT INTO workflow_history VALUES (?, ?)", (f"{workflow['id']}-version", workflow["id"]))
                 connection.execute("INSERT INTO shared_workflow VALUES (?, 'project')", (workflow["id"],))
@@ -127,12 +130,12 @@ class LocalN8n:
 
     def daemon_publishes(self, connection: sqlite3.Connection, workflow_id: str) -> None:
         connection.execute("INSERT INTO workflow_published_version VALUES (?, ?)", (workflow_id, f"{workflow_id}-version"))
-        if workflow_id == CHECK_ID:
-            connection.execute("INSERT INTO webhook_entity VALUES ('imessage-relay-check', 'POST', ?)", (workflow_id,))
+        if workflow_id != ALARM_ID:
+            connection.execute("INSERT INTO webhook_entity VALUES (?, 'POST', ?)", (f"path-of-{workflow_id}", workflow_id))
         connection.execute("INSERT INTO workflow_publication_outbox (workflowId, status) VALUES (?, 'completed')", (workflow_id,))
         connection.execute("INSERT INTO workflow_statistics (workflowId, name) VALUES (?, 'production_success')", (workflow_id,))
 
-    def daemon_unpublishes(self, connection: sqlite3.Connection, workflow_ids: tuple[str, ...] = (CHECK_ID, ALARM_ID)) -> None:
+    def daemon_unpublishes(self, connection: sqlite3.Connection, workflow_ids: tuple[str, ...] = check_relay.CHECK_WORKFLOW_IDS) -> None:
         for workflow_id in workflow_ids:
             connection.execute("DELETE FROM workflow_published_version WHERE workflowId = ?", (workflow_id,))
             connection.execute("DELETE FROM webhook_entity WHERE workflowId = ?", (workflow_id,))
@@ -162,7 +165,8 @@ class InstanceTest(unittest.TestCase):
     def install(self, secret: str = "a-secret") -> None:
         credentials = check_relay.check_credentials(secret, secret, None)
         self.instance.install([check_relay.build_check_alarm_workflow(alarm_template(), RUN_RECORD_TABLE_ID),
-                               check_relay.build_check_workflow(template(), STAND_IN_URL, RUN_RECORD_TABLE_ID, None)], credentials)
+                               check_relay.build_check_workflow(template(), STAND_IN_URL, RUN_RECORD_TABLE_ID, None),
+                               check_relay.build_table_gone_workflow(template(), STAND_IN_URL, None)], credentials)
 
     def write_row(self, route: str = "zack") -> None:
         with open_database(self.database) as connection:
@@ -214,7 +218,9 @@ class InstanceTest(unittest.TestCase):
                               (f"data_table_user_{RUN_RECORD_TABLE_ID}", "(1000, 'r', 'z', 'o', 1, 1)"),
                               ("workflow_entity", f"('{ALARM_ID}', 'x', NULL)"),
                               ("workflow_publication_outbox", f"(1001, '{ALARM_ID}', 'completed')"),
-                              ("workflow_statistics", f"(1001, '{ALARM_ID}', 'n')")):
+                              ("workflow_statistics", f"(1001, '{ALARM_ID}', 'n')"),
+                              ("workflow_entity", f"('{TABLE_GONE_ID}', 'x', NULL)"),
+                              ("webhook_entity", f"('q', 'POST', '{TABLE_GONE_ID}')")):
             with self.subTest(table):
                 with open_database(self.database) as connection:
                     connection.execute(f"INSERT INTO {table} VALUES {values}")
@@ -238,7 +244,7 @@ class InstanceTest(unittest.TestCase):
             for table in ("shared_workflow", "shared_credentials", "workflow_history"):
                 with self.subTest(table):
                     self.assertEqual(connection.execute(f"SELECT * FROM {table}").fetchall(), [row for row in before[table] if CHECK_ID not in row
-                                     and ALARM_ID not in row and check_relay.CHECK_RELAY_CREDENTIAL_ID not in row
+                                     and ALARM_ID not in row and TABLE_GONE_ID not in row and check_relay.CHECK_RELAY_CREDENTIAL_ID not in row
                                      and check_relay.CHECK_PLUGIN_CREDENTIAL_ID not in row])
 
     def test_the_real_relay_is_exactly_as_it_was(self):
@@ -316,17 +322,17 @@ class InstanceTest(unittest.TestCase):
         for kept in ("import.stale", ".n8n", "log"):
             self.assertTrue((self.scratch / kept).is_dir(), kept)
 
-    def test_installing_imports_credentials_then_both_workflows_then_publishes_both(self):
+    def test_installing_imports_credentials_then_each_workflow_then_publishes_each(self):
         self.install()
-        self.assertEqual(self.cli_commands(), ["import:credentials", "import:workflow", "import:workflow", "publish:workflow", "publish:workflow"])
+        self.assertEqual(self.cli_commands(), ["import:credentials", *["import:workflow"] * 3, *["publish:workflow"] * 3])
         published = [call[2] for call in self.run.calls if call[0] == str(check_relay.CLI_SCRIPT) and call[1] == "publish:workflow"]
-        self.assertEqual(published, [f"--id={ALARM_ID}", f"--id={CHECK_ID}"])
+        self.assertEqual(published, [f"--id={ALARM_ID}", f"--id={CHECK_ID}", f"--id={TABLE_GONE_ID}"])
 
-    def test_both_workflows_are_unpublished_and_removed(self):
+    def test_every_workflow_of_the_checks_is_unpublished_and_removed(self):
         self.install()
         self.instance.remove_leftovers()
         unpublished = [call[2] for call in self.run.calls if call[0] == str(check_relay.CLI_SCRIPT) and call[1] == "unpublish:workflow"]
-        self.assertEqual(sorted(unpublished), sorted([f"--id={ALARM_ID}", f"--id={CHECK_ID}"]))
+        self.assertEqual(sorted(unpublished), sorted(f"--id={workflow_id}" for workflow_id in check_relay.CHECK_WORKFLOW_IDS))
         self.assertEqual(self.instance.leftovers(), 0)
 
     def test_the_alarm_workflow_is_waited_for_until_the_daemon_publishes_it(self):
@@ -359,7 +365,7 @@ class InstanceTest(unittest.TestCase):
 
     def test_the_cli_is_handed_the_real_content_through_a_file(self):
         self.install("a-secret")
-        self.assertEqual(json.loads(self.run.seen_by_cli["import:workflow"])["id"], CHECK_ID)
+        self.assertEqual(self.run.workflow_ids_imported, [ALARM_ID, CHECK_ID, TABLE_GONE_ID])
         self.assertIn("a-secret", self.run.seen_by_cli["import:credentials"])
 
     def test_no_secret_is_on_any_command_line(self):

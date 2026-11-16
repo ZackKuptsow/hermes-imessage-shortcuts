@@ -45,6 +45,20 @@ class CheckAlarmWorkflowTest(unittest.TestCase):
         check_relay.build_check_alarm_workflow(alarm, RUN_RECORD_TABLE_ID)
         self.assertEqual((relay, alarm), (template(), alarm_template()))
 
+    def test_the_table_gone_copy_is_the_checks_relay_under_its_own_name_id_and_path_writing_nowhere_real(self):
+        relay = check_relay.build_check_workflow(template(), STAND_IN_URL, RUN_RECORD_TABLE_ID, None)
+        gone = check_relay.build_table_gone_workflow(template(), STAND_IN_URL, None)
+        self.assertEqual((gone["name"], gone["id"]), (check_relay.CHECK_TABLE_GONE_WORKFLOW_NAME, check_relay.CHECK_TABLE_GONE_WORKFLOW_ID))
+        self.assertRegex(gone["id"], r"^[0-9A-Za-z]{16}$")
+        self.assertEqual(nodes_of_type(gone, WEBHOOK_TYPE)[0]["parameters"]["path"], check_relay.CHECK_TABLE_GONE_WEBHOOK_PATH)
+        self.assertNotEqual(nodes_of_type(gone, WEBHOOK_TYPE)[0]["webhookId"], nodes_of_type(relay, WEBHOOK_TYPE)[0]["webhookId"])
+        self.assertEqual({node["parameters"]["dataTableId"]["value"] for node in nodes_of_type(gone, DATA_TABLE_TYPE)},
+                         {check_relay.MISSING_TABLE_ID})
+        self.assertRegex(check_relay.MISSING_TABLE_ID, r"^[0-9A-Za-z]{16}$", "shaped as n8n's ids, so the insert fails by not finding it")
+        self.assertEqual(gone["settings"]["errorWorkflow"], check_relay.CHECK_ALARM_WORKFLOW_ID)
+        self.assertNotIn(PLUGIN_PORT, json.dumps(gone))
+        self.assertEqual(nodes_of_type(gone, HTTP_REQUEST_TYPE)[0]["credentials"], nodes_of_type(relay, HTTP_REQUEST_TYPE)[0]["credentials"])
+
     def test_a_relay_failed_that_still_names_the_real_id_is_refused(self):
         changed = alarm_template()
         changed["nodes"][0]["notes"] = check_relay.workflow_template.RELAY_FAILED_WORKFLOW_ID

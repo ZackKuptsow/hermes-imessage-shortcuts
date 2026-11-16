@@ -26,7 +26,16 @@ import urllib.request
 import warnings
 from dataclasses import dataclass, field
 
-from n8n_check_support import HTTP_REQUEST_TYPE, N8N_DIRECTORY, RUN_RECORD_TABLE_ID, alarm_template, check_relay, nodes_of_type, template
+from n8n_check_support import (
+    DATA_TABLE_TYPE,
+    HTTP_REQUEST_TYPE,
+    N8N_DIRECTORY,
+    RUN_RECORD_TABLE_ID,
+    alarm_template,
+    check_relay,
+    nodes_of_type,
+    template,
+)
 
 FAST = check_relay.Timing(row_wait_seconds=1.0, settle_seconds=0.02, poll_seconds=0.01, slow_answer_seconds=0.3,
                           webhook_wait_seconds=0.3)
@@ -65,6 +74,7 @@ class FakeRelay:
     alarms_with_the_wrong_outcome: bool = False
     logs_no_alarm_line: bool = False
     alarm_holds_the_status: bool = False
+    table_gone_writes_anyway: bool = False
 
 
 class FakeN8n:
@@ -75,6 +85,8 @@ class FakeN8n:
         self.rows_written: list[dict] = []
         self.log_lines: list[str] = []
         self.error_workflow: str | None = None
+        self.table_gone_error_workflow: str | None = None
+        self.table_gone_table: str | None = None
         self.published_alarm_workflow: str | None = None
         self.events: list[str] = []
         self.has_leftovers = False
@@ -104,6 +116,10 @@ class FakeN8n:
     @property
     def webhook_url(self) -> str:
         return f"http://127.0.0.1:{self.server.server_address[1]}/webhook/check"
+
+    @property
+    def table_gone_url(self) -> str:
+        return f"{self.webhook_url}-table-gone"
 
     def stop(self) -> None:
         self.server.shutdown()
@@ -136,8 +152,13 @@ class FakeN8n:
         self.respond(handler, RECEIVED_STATUS)
         document = json.loads(body)
         if not isinstance(document, dict):
-            # As the real relay's run throws when it can read no sender: no row of its own.
-            self.raise_alarm("relay_failed")
+            # As the real relay: a body with no sender is dropped, and nothing throws.
+            self.write_row("dropped", "dropped", None)
+            return
+        if handler.path.endswith("-table-gone") and self.table_gone_table != RUN_RECORD_TABLE_ID \
+                and not self.breakage.table_gone_writes_anyway:
+            # Its insert names a table that is not there, so its run throws before any row.
+            self.raise_alarm("relay_failed", self.table_gone_error_workflow)
             return
         self.route(document)
 
@@ -185,9 +206,10 @@ class FakeN8n:
         if alarmed:
             self.raise_alarm(outcome)
 
-    def raise_alarm(self, outcome: str) -> None:
+    def raise_alarm(self, outcome: str, error_workflow: str | None = None) -> None:
         """What n8n does with a failed run: hand it to the published workflow the relay names, if any."""
-        if self.breakage.raises_no_alarms or self.error_workflow is None or self.error_workflow != self.published_alarm_workflow:
+        error_workflow = error_workflow or self.error_workflow
+        if self.breakage.raises_no_alarms or error_workflow is None or error_workflow != self.published_alarm_workflow:
             return
         if self.breakage.alarms_with_the_wrong_outcome:
             outcome = "relay_failed" if outcome != "relay_failed" else "timeout"
@@ -250,7 +272,11 @@ class FakeN8n:
         workflow = next(entry for entry in workflows if entry["id"] == check_relay.CHECK_WORKFLOW_ID)
         self.installed = (workflow, credentials)
         self.error_workflow = workflow["settings"].get("errorWorkflow")
-        self.published_alarm_workflow = next((entry["id"] for entry in workflows if entry["id"] != check_relay.CHECK_WORKFLOW_ID), None)
+        self.published_alarm_workflow = next((entry["id"] for entry in workflows if entry["id"] == check_relay.CHECK_ALARM_WORKFLOW_ID), None)
+        table_gone = next((entry for entry in workflows if entry["id"] == check_relay.CHECK_TABLE_GONE_WORKFLOW_ID), None)
+        if table_gone is not None:
+            self.table_gone_error_workflow = table_gone["settings"].get("errorWorkflow")
+            self.table_gone_table = nodes_of_type(table_gone, DATA_TABLE_TYPE)[0]["parameters"]["dataTableId"]["value"]
         self.webhook_registered = True
         self.relay_secret = next(entry["data"]["value"] for entry in credentials if entry["name"] == check_relay.CHECK_RELAY_CREDENTIAL)
         self.plugin_secret = next(entry["data"]["value"] for entry in credentials if entry["name"] == check_relay.CHECK_PLUGIN_CREDENTIAL)
@@ -271,7 +297,7 @@ class Run:
 def run_check(fake: FakeN8n, gate_broken: str | None = None) -> Run:
     lines: list[str] = []
     code = check_relay.run_check(fake, (template(), alarm_template()), RUN_RECORD_TABLE_ID, gate_broken, FAST, lines.append,
-                                 webhook_url=fake.webhook_url)
+                                 webhook_urls=(fake.webhook_url, fake.table_gone_url))
     return Run(code, lines)
 
 
@@ -386,6 +412,9 @@ class BrokenRelayTest(CheckTest):
     def test_an_alarm_row_holding_a_field_of_the_relays_is_red(self):
         self.assert_red(alarm_holds_the_status=True)
 
+    def test_a_run_that_should_have_thrown_writing_a_row_instead_is_red(self):
+        self.assert_red(table_gone_writes_anyway=True)
+
 
 class AlarmCaseTest(CheckTest):
     """Issue #10's alarms, seen through the check: one row and a log line for each failure, none for the rest."""
@@ -409,7 +438,8 @@ class AlarmCaseTest(CheckTest):
         self.assertEqual(quiet, {"accepted", "dropped", "dropped_by_plugin"})
         self.assertEqual({case.answer_status for case in cases if case.expected_outcome == "plugin_refusing"}, {400, 403, 503})
         self.assertTrue(any(case.answers_garbage for case in cases))
-        self.assertTrue(any(case.posts_unreadable_body and case.expected_route is None for case in cases))
+        self.assertEqual([(case.expected_route, case.expected_alarm) for case in cases if case.posts_to_table_gone], [(None, "relay_failed")])
+        self.assertEqual([(case.expected_outcome, case.expected_alarm) for case in cases if case.posts_senderless_body], [("dropped", None)])
 
     def test_a_relay_naming_another_error_workflow_raises_no_alarm_and_is_red(self):
         fake = self.fake()
@@ -488,7 +518,8 @@ class CleanupTest(CheckTest):
             raise KeyboardInterrupt
 
         with self.assertRaises(KeyboardInterrupt):
-            check_relay.run_check(fake, template(), RUN_RECORD_TABLE_ID, None, FAST, interrupted, webhook_url=fake.webhook_url)
+            check_relay.run_check(fake, (template(), alarm_template()), RUN_RECORD_TABLE_ID, None, FAST, interrupted,
+                                  webhook_urls=(fake.webhook_url, fake.table_gone_url))
         self.assertEqual(fake.events[-1], "remove_leftovers")
 
     def test_a_failed_install_still_cleans_up_and_is_red(self):

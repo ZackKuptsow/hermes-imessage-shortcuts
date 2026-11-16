@@ -7,9 +7,10 @@ Renders the relay template under its own name, webhook path and credentials, aim
 plugin on a free port, and writing to a second Data Table, `run_record_check`, so the real relay,
 its table, its secrets and the plugin on 8645 are never touched. Beside it goes a copy of Relay
 failed under its own name and id, which the check's relay names as its error workflow, writing its
-alarms to the same table. It posts each case and reads the rows each leaves, the alarm row among
-them, and the line each alarm puts in n8n's log, then removes everything it made. The senders are
-made up and the secrets random for each run, so it never reads your handle file or your secrets,
+alarms to the same table, and a third copy of the relay writing to a table that is not there, so
+that one post makes a run throw. It posts each case and reads the rows each leaves, the alarm row
+among them, and the line each alarm puts in n8n's log, then removes everything it made. The senders
+are made up and the secrets random for each run, so it never reads your handle file or your secrets,
 and it prints no secret, handle, body or log line. With --break it breaks one gate on purpose: that
 run should go red.
 
@@ -67,7 +68,15 @@ CHECK_WORKFLOW_ID = "relayCheckWrkflw"
 # The check's Relay failed, which its relay names by this id, so the real one never hears of a check.
 CHECK_ALARM_WORKFLOW_NAME = "Relay failed check"
 CHECK_ALARM_WORKFLOW_ID = "relayFailedCheck"
-CHECK_WORKFLOW_IDS = (CHECK_WORKFLOW_ID, CHECK_ALARM_WORKFLOW_ID)
+# The check's relay once more, writing to a table that is not there, so its run throws as the real
+# relay's would with run_record gone: the one way to see Relay failed's catch-all, relay_failed, since
+# the relay copes with any body it can be posted (seen at the Mac on 2026-11-16).
+CHECK_TABLE_GONE_WORKFLOW_NAME = "iMessage relay check, table gone"
+CHECK_TABLE_GONE_WORKFLOW_ID = "relayCheckNoTabl"
+CHECK_TABLE_GONE_WEBHOOK_PATH = "imessage-relay-check-table-gone"
+CHECK_TABLE_GONE_WEBHOOK_URL = f"http://127.0.0.1:5678/webhook/{CHECK_TABLE_GONE_WEBHOOK_PATH}"
+MISSING_TABLE_ID = "checkTableIsGone"
+CHECK_WORKFLOW_IDS = (CHECK_WORKFLOW_ID, CHECK_ALARM_WORKFLOW_ID, CHECK_TABLE_GONE_WORKFLOW_ID)
 CHECK_WORKFLOW_IDS_SQL = ", ".join(f"'{identifier}'" for identifier in CHECK_WORKFLOW_IDS)
 CHECK_WEBHOOK_PATH = "imessage-relay-check"
 CHECK_WEBHOOK_URL = f"http://127.0.0.1:5678/webhook/{CHECK_WEBHOOK_PATH}"
@@ -118,8 +127,9 @@ ROUTE_DROPPED = "dropped"
 ROUTE_ALARM = "alarm"
 # What the stand-in sends instead of an answer when a case asks for garbage: not HTTP at all.
 GARBAGE_ANSWER = b"not an HTTP answer\r\n\r\n"
-# A JSON body the relay can read no sender from, so its run throws on its own account.
-UNREADABLE_BODY = b"null"
+# A JSON body with no sender in it. The relay drops it and raises nothing: every expression it runs
+# copes with any JSON at all, so no post makes its run throw (seen at the Mac on 2026-11-16).
+SENDERLESS_BODY = b"null"
 
 Report = Callable[[str], None]
 
@@ -158,7 +168,8 @@ class Case:
     answer_delay_seconds: float = 0.0
     expected_alarm: str | None = None
     answers_garbage: bool = False
-    posts_unreadable_body: bool = False
+    posts_senderless_body: bool = False
+    posts_to_table_gone: bool = False
 
 
 def relay_cases(timing: Timing) -> tuple[Case, ...]:
@@ -187,8 +198,8 @@ def relay_cases(timing: Timing) -> tuple[Case, ...]:
              answer_delay_seconds=timing.slow_answer_seconds, expected_alarm="timeout"),
         Case("garbage from the plugin", SECRET_RIGHT, KNOWN_SENDER, RECEIVED_STATUS, ROUTE_ZACK, "plugin_unreachable", reaches_plugin=True,
              answers_garbage=True, expected_alarm="plugin_unreachable"),
-        Case("a body the relay cannot read", SECRET_RIGHT, KNOWN_SENDER, RECEIVED_STATUS, posts_unreadable_body=True,
-             expected_alarm="relay_failed"),
+        Case("a body with no sender", SECRET_RIGHT, KNOWN_SENDER, RECEIVED_STATUS, ROUTE_DROPPED, "dropped", posts_senderless_body=True),
+        Case("table gone", SECRET_RIGHT, UNKNOWN_SENDER, RECEIVED_STATUS, posts_to_table_gone=True, expected_alarm="relay_failed"),
     )
 
 
@@ -294,6 +305,15 @@ def build_check_workflow(template: dict, stand_in_url: str, table_id: str, gate_
         raise CheckError("the check's workflow would still post to the real plugin")
     if workflow_template.RELAY_FAILED_WORKFLOW_ID in json.dumps(workflow):
         raise CheckError("the check's workflow would still hand its failures to the real Relay failed")
+    return workflow
+
+
+def build_table_gone_workflow(template: dict, stand_in_url: str, gate_broken: str | None) -> dict:
+    """The check's relay under a third name, id and path, writing to a table that is not there."""
+    workflow = build_check_workflow(template, stand_in_url, MISSING_TABLE_ID, gate_broken)
+    workflow["name"] = CHECK_TABLE_GONE_WORKFLOW_NAME
+    workflow["id"] = CHECK_TABLE_GONE_WORKFLOW_ID
+    the_one_node(workflow, WEBHOOK_TYPE)["parameters"]["path"] = CHECK_TABLE_GONE_WEBHOOK_PATH
     return workflow
 
 
@@ -457,7 +477,7 @@ def run_one_case(case: Case, instance: object, stand_in: StandInPlugin, webhook_
     log_mark = instance.log_mark()
     document = {"sender": case.sender, "sent_at": datetime.now(timezone.utc).isoformat(), "text": CHECK_TEXT}
     secret = {SECRET_NONE: None, SECRET_WRONG: secrets.token_hex(32), SECRET_RIGHT: relay_secret}[case.secret]
-    body = UNREADABLE_BODY if case.posts_unreadable_body else json.dumps(document, ensure_ascii=False).encode("utf-8")
+    body = SENDERLESS_BODY if case.posts_senderless_body else json.dumps(document, ensure_ascii=False).encode("utf-8")
     status = post_to_webhook(webhook_url, secret, body)
     wanted = (case.expected_route is not None) + (case.expected_alarm is not None)
     if wanted == 0:
@@ -497,7 +517,7 @@ def record_the_over_long_body(instance: object, stand_in: StandInPlugin, webhook
 
 
 def exercise(instance: object, stand_in: StandInPlugin, templates: tuple[dict, dict], table_id: str, gate_broken: str | None,
-             timing: Timing, report: Report, webhook_url: str) -> int:
+             timing: Timing, report: Report, webhook_urls: tuple[str, str]) -> int:
     """Everything between the clean-ups: install, every case. Returns the exit code."""
     relay_secret, plugin_secret = secrets.token_hex(32), secrets.token_hex(32)
     report(f"publishing the check's workflows, which takes about half a minute{'' if gate_broken is None else f'; {gate_broken} is broken on purpose'}")
@@ -507,14 +527,17 @@ def exercise(instance: object, stand_in: StandInPlugin, templates: tuple[dict, d
     relay_template, alarm_template = templates
     workflow = build_check_workflow(relay_template, stand_in.url, table_id, gate_broken)
     alarm_workflow = build_check_alarm_workflow(alarm_template, table_id)
-    instance.install([alarm_workflow, workflow], check_credentials(relay_secret, plugin_secret, gate_broken))
+    table_gone_workflow = build_table_gone_workflow(relay_template, stand_in.url, gate_broken)
+    instance.install([alarm_workflow, workflow, table_gone_workflow], check_credentials(relay_secret, plugin_secret, gate_broken))
+    webhook_url, table_gone_url = webhook_urls
     wait_for_webhook(webhook_url, timing)
+    wait_for_webhook(table_gone_url, timing)
     # n8n hands a failed run only to an error workflow it has published, and says nothing if it has not.
     instance.wait_until_published(CHECK_ALARM_WORKFLOW_ID, timing.webhook_wait_seconds)
     cases = relay_cases(timing)
     passed = 0
     for case in cases:
-        held, line = run_one_case(case, instance, stand_in, webhook_url, relay_secret, timing)
+        held, line = run_one_case(case, instance, stand_in, table_gone_url if case.posts_to_table_gone else webhook_url, relay_secret, timing)
         passed += held
         report(line)
     record_the_over_long_body(instance, stand_in, webhook_url, relay_secret, timing, report)
@@ -526,7 +549,7 @@ def exercise(instance: object, stand_in: StandInPlugin, templates: tuple[dict, d
 
 
 def run_check(instance: object, templates: tuple[dict, dict], table_id: str, gate_broken: str | None, timing: Timing, report: Report,
-              webhook_url: str = CHECK_WEBHOOK_URL) -> int:
+              webhook_urls: tuple[str, str] = (CHECK_WEBHOOK_URL, CHECK_TABLE_GONE_WEBHOOK_URL)) -> int:
     """The whole run, given the relay's template and Relay failed's. Whatever happens, the clean-up
     runs before anything else is said."""
     stand_in = StandInPlugin()
@@ -534,7 +557,7 @@ def run_check(instance: object, templates: tuple[dict, dict], table_id: str, gat
     code = EXIT_FAILED
     clean_up_problem = None
     try:
-        code = exercise(instance, stand_in, templates, table_id, gate_broken, timing, report, webhook_url)
+        code = exercise(instance, stand_in, templates, table_id, gate_broken, timing, report, webhook_urls)
     except CheckError as error:
         report(f"FAIL: {error}")
     finally:

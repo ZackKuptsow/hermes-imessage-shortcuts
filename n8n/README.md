@@ -239,12 +239,17 @@ it exits 0 only if all of them held:
 | plugin refusing, with a 503, a 400 and a 403 | 200 | `plugin_refusing` and the status | `plugin_refusing` |
 | timeout (the stand-in answers after 7 seconds) | 200 | `timeout` | `timeout` |
 | garbage from the plugin (an answer that is not HTTP) | 200 | `plugin_unreachable` | `plugin_unreachable` |
-| a body the relay cannot read (`null`) | 200 | no row: the relay's run throws before its record | `relay_failed` |
+| a body with no sender (`null`) | 200 | `dropped` | none |
+| table gone (posted to a third copy of the relay, whose insert names a table that is not there) | 200 | no row: its run throws at the insert | `relay_failed` |
 
 An alarm holds when there is one row on route `alarm` naming it and at least one line in `n8n.log`
 saying `alarm <outcome>`; a case with no alarm holds only with no alarm row. The check's relay names
 the check's own `Relay failed check` as its error workflow, so the real `Relay failed` never hears
-of a check, and the check waits for n8n to publish it before the first post.
+of a check, and the check waits for n8n to publish it before the first post. No post can make the
+relay's run throw, since every expression in it copes with any JSON (a `null` body was posted at the
+Mac on 2026-11-16 and was dropped), so the catch-all `relay_failed` is seen through the table-gone
+copy, which fails as the relay would with `run_record` gone. Each alarm case reports 2 log lines:
+n8n's error reporter writes every node failure twice, the relay's own failures too.
 
 A last post of over 65,536 bytes is reported rather than judged, to show what the webhook does with
 a body past the plugin's limit.
@@ -283,10 +288,10 @@ its cause, its `received_at` the moment it was raised, and no `plugin_status` or
 The outcome is a fixed name and never an error's message, since a message can carry what a node was
 handed: `Relay failed` compares the message with the four names and stores only the match, and its
 test refuses any other read of the failed run but its id. The other is a line in `n8n.log`, at
-`error`, whose message starts `alarm <outcome>`: each alarm ends in a Stop and Error node, the one
-way n8n 2.45.7 lets a workflow write a line of its choosing, so the alarm workflow's own run ends
-as failed too. n8n may add the stack after the two words, and also logs the failure that caused
-the alarm on a line of its own. To read them:
+`error`, whose message is `alarm <outcome>`: each alarm ends in a Stop and Error node, the one way
+n8n 2.45.7 lets a workflow write a line of its choosing, so the alarm workflow's own run ends as
+failed too. n8n writes that line twice, as it does every node failure, and the failure that caused
+the alarm, `timeout` say, twice more just before it. To read them:
 
 ```sh
 sudo -u _n8n sqlite3 -readonly /var/n8n/.n8n/database.sqlite \
