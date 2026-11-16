@@ -221,7 +221,11 @@ switch cannot provide. Two more rows for the gate table:
   the drift it could hide (table and allow list disagreeing) is prevented by rendering both
   from one file. When the plugin changes in phase 4 it adds a drop-reason header, and the
   rule alarms on a sender drop alone. The alarm needs a way to tell Zack without going
-  through the model. First delivery: the row and a line in n8n's log, read with `tail`.
+  through the model. First delivery: the row and a line in n8n's log, read with `tail`. How,
+  settled on Issue #10 (2026-11-16): n8n hands an error workflow only runs that fail, so the
+  relay fails on purpose after its row for those four outcomes, with the outcome's name as
+  the message; and since no node writes a chosen line to the log, each alarm ends in a Stop
+  and Error whose message, `alarm <outcome>`, n8n logs at `error`.
   Second delivery: a `send` endpoint on the plugin's listener (`POST /imessage/send`, same
   secret, recipient refused unless on the allow list) lets n8n text Zack "the texting path
   failed: plugin answered 503 at 17:02" from inside the trust boundary, with no new grant.

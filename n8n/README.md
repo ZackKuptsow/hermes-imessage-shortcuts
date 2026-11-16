@@ -225,17 +225,26 @@ It does not restart n8n, so the real relay keeps serving through a run. It publi
 and the running daemon picks that up within about half a minute. Removing its workflow takes as long
 again: n8n refuses to delete a workflow until the daemon has finished unpublishing it.
 
-Each case prints its status, the row it found, and `pass` or `FAIL`, and it exits 0 only if all of
-them held:
+Each case prints its status, the rows it found, the log lines of its alarm, and `pass` or `FAIL`, and
+it exits 0 only if all of them held:
 
-| Case | Status | Row, and the rest |
-|---|---|---|
-| no secret, wrong secret | 403 | no row, and nothing reaches the stand-in |
-| unknown sender | 200 | `dropped`, and nothing reaches the stand-in |
-| plugin unreachable (the stand-in stopped) | 200 | `plugin_unreachable` |
-| accepted | 200 | `accepted`, 202, with the stand-in holding the body posted, unchanged |
-| dropped by the plugin, refused secret, plugin refusing | 200 | `dropped_by_plugin` 204, `secret_refused` 401, `plugin_refusing` 503 |
-| timeout (the stand-in answers after 7 seconds) | 200 | `timeout` |
+| Case | Status | Row, and the rest | Alarm (Issue #10) |
+|---|---|---|---|
+| no secret, wrong secret | 403 | no row, and nothing reaches the stand-in | none |
+| unknown sender | 200 | `dropped`, and nothing reaches the stand-in | none |
+| plugin unreachable (the stand-in stopped) | 200 | `plugin_unreachable` | `plugin_unreachable` |
+| accepted | 200 | `accepted`, 202, with the stand-in holding the body posted, unchanged | none |
+| dropped by the plugin | 200 | `dropped_by_plugin` 204 | none |
+| refused secret | 200 | `secret_refused` 401 | `secret_refused` |
+| plugin refusing, with a 503, a 400 and a 403 | 200 | `plugin_refusing` and the status | `plugin_refusing` |
+| timeout (the stand-in answers after 7 seconds) | 200 | `timeout` | `timeout` |
+| garbage from the plugin (an answer that is not HTTP) | 200 | `plugin_unreachable` | `plugin_unreachable` |
+| a body the relay cannot read (`null`) | 200 | no row: the relay's run throws before its record | `relay_failed` |
+
+An alarm holds when there is one row on route `alarm` naming it and at least one line in `n8n.log`
+saying `alarm <outcome>`; a case with no alarm holds only with no alarm row. The check's relay names
+the check's own `Relay failed check` as its error workflow, so the real `Relay failed` never hears
+of a check, and the check waits for n8n to publish it before the first post.
 
 A last post of over 65,536 bytes is reported rather than judged, to show what the webhook does with
 a body past the plugin's limit.
@@ -265,20 +274,38 @@ Three workflows, each a template in `workflows/`:
 
 | Workflow | Template | Alarms on |
 |---|---|---|
-| `iMessage relay` | `imessage-relay.json` | nothing of its own: it writes each run's outcome to `run_record`, and the alarm for `plugin_unreachable`, `plugin_refusing`, `secret_refused` and `timeout` is not built yet (below) |
-| `Relay failed` | `relay-failed.json` | a relay run that fails outright, which n8n hands to the relay's error workflow: outcome `relay_failed` |
+| `iMessage relay` | `imessage-relay.json` | nothing itself. After its run record, a run ending `plugin_unreachable`, `plugin_refusing` (any status but 202, 204 and 401), `secret_refused` or `timeout` fails on purpose, with the outcome's name as its message, so n8n hands it to `Relay failed`. `accepted`, `dropped` and `dropped_by_plugin` end as successes |
+| `Relay failed` | `relay-failed.json` | each relay run that fails. The outcome is the failed run's message when that is exactly one of the four names above, and `relay_failed` for any other failure |
 | `Inbound heartbeat` | `inbound-heartbeat.json` | run every morning at 08:00, no `accepted` run from route `zack` in the last 36 hours: outcome `inbound_quiet`. The same run deletes the rows older than 7 days, and no others |
 
-An alarm is a row in `run_record` with route `alarm` and an outcome that names its cause, its
-`received_at` the moment it was raised, and no `plugin_status` or `duration_ms`. The outcome is a
-fixed name and never an error's message, since a message can carry what a node was handed; `Relay
-failed` reads nothing of the failed run at all, and its test refuses a read of anything but the run's
-id. The alarms so far:
+An alarm is two things. One is a row in `run_record` with route `alarm` and an outcome that names
+its cause, its `received_at` the moment it was raised, and no `plugin_status` or `duration_ms`.
+The outcome is a fixed name and never an error's message, since a message can carry what a node was
+handed: `Relay failed` compares the message with the four names and stores only the match, and its
+test refuses any other read of the failed run but its id. The other is a line in `n8n.log`, at
+`error`, whose message starts `alarm <outcome>`: each alarm ends in a Stop and Error node, the one
+way n8n 2.45.7 lets a workflow write a line of its choosing, so the alarm workflow's own run ends
+as failed too. n8n may add the stack after the two words, and also logs the failure that caused
+the alarm on a line of its own. To read them:
 
 ```sh
 sudo -u _n8n sqlite3 -readonly /var/n8n/.n8n/database.sqlite \
   "SELECT received_at, outcome FROM data_table_user_TABLE_ID WHERE route = 'alarm' ORDER BY id;"
+grep '"message":"alarm ' /var/n8n/log/n8n.log
 ```
+
+**Installing them.** `import.sh` takes the workflow as its second argument, `relay` by default:
+
+```sh
+n8n/import.sh TABLE_ID relay-failed
+n8n/import.sh TABLE_ID inbound-heartbeat
+```
+
+Publish both in the editor, as the relay is: n8n hands a failed run only to an error workflow that
+is published, and a Schedule Trigger fires only once published. The relay names `Relay failed` by
+its fixed id, `relayFailedAlarm`, which the template carries and `export.py` keeps; every other
+workflow id is dropped on export as before. Import `Relay failed` before the relay starts failing on
+purpose, or those runs alarm nowhere.
 
 **The two numbers to tune** are at the top of the heartbeat, in its `Heartbeat constants` node:
 `quiet_hours`, 36, how long without an accepted run before it alarms, and `keep_days`, 7, how long a
@@ -286,22 +313,33 @@ row is kept. `tests/test_n8n_workflows.py` holds both values too, so a change is
 The heartbeat asks by each row's own `createdAt`, which n8n stamps, rather than by `received_at`, a
 string whose offset changes with daylight saving time.
 
+**Trying the heartbeat by hand.** Cut-over has not happened, so `run_record` holds only test rows and
+may be emptied (decided on Issue #10). In the editor, with `run_record` emptied, run `Inbound
+heartbeat`: one `inbound_quiet` row and its log line. Add an `accepted` row on route `zack`, run it
+again: nothing. Add a row older than 7 days beside one younger, run it: the older goes, the younger
+stays.
+
+**What raises nothing yet.** A heartbeat that fails outright, its Data Table gone or n8n down at
+08:00, raises no alarm: nothing watches the heartbeat until T08. Neither does a relay run n8n never
+starts, which the heartbeat's 36 hours are there to catch.
+
 What n8n 2.45.7 does that decides how these run, read in its installed source on 2026-11-15:
 
 - It hands a failed run to the error workflow even though no run is saved (`hookFunctionsSave` in
   `execution-lifecycle-hooks.js`), but not a run started by hand in the editor, and only to an error
   workflow that is published (`loadErrorWorkflowData` in `workflow-execution.service.js`). So `Relay
   failed` is published like the relay, and is tried with a real post, not the editor's run button.
+- It hands over only runs that fail. The relay's request continues on error and never errors on a
+  status, so without failing on purpose its four failing outcomes would end as successes.
 - A workflow names its error workflow by that workflow's id, in `settings.errorWorkflow`, not by name.
-- The Schedule Trigger keeps the time of `GENERIC_TIMEZONE`, which the plist leaves unset, so n8n's
-  own default, `America/New_York`, decides when 08:00 is, not the Mac's time zone setting.
+- The Schedule Trigger keeps the time of `GENERIC_TIMEZONE`, pinned in the plist to
+  `America/New_York`, so the plist rather than the Mac's time zone setting decides when 08:00 is.
 - No node on the closed list writes a line of its own to `n8n.log`, and n8n writes none for a run at
-  `info`; a node that fails is logged at `error`, with its message.
+  `info`; a node that fails is logged at `error`, with its message, which is why Stop and Error is on
+  the list.
 
-**Not wired yet.** The relay does not name `Relay failed` in its settings; `render.py`, `export.py`
-and `import.sh` handle the relay alone, so neither template can be imported with them; no alarm row
-is written for the relay's four failing outcomes; and no alarm writes a line to the log. Until those
-land, the two templates are checked in git and nowhere else.
+`check_relay.py` sees every row of the table above but the heartbeat's: it imports its own `Relay
+failed check` beside its relay, and each case says which alarm it raised and how many log lines.
 
 ## Upgrading
 
