@@ -1,0 +1,369 @@
+{
+  "connections": {
+    "Every morning": {
+      "main": [
+        [
+          {
+            "index": 0,
+            "node": "Heartbeat constants",
+            "type": "main"
+          }
+        ]
+      ]
+    },
+    "Find an accepted run": {
+      "main": [
+        [
+          {
+            "index": 0,
+            "node": "Quiet too long",
+            "type": "main"
+          }
+        ]
+      ]
+    },
+    "Heartbeat constants": {
+      "main": [
+        [
+          {
+            "index": 0,
+            "node": "Find an accepted run",
+            "type": "main"
+          },
+          {
+            "index": 0,
+            "node": "Prune old rows",
+            "type": "main"
+          }
+        ]
+      ]
+    },
+    "Insert alarm row": {
+      "main": [
+        [
+          {
+            "index": 0,
+            "node": "Log the alarm",
+            "type": "main"
+          }
+        ]
+      ]
+    },
+    "Quiet too long": {
+      "main": [
+        [
+          {
+            "index": 0,
+            "node": "Record alarm",
+            "type": "main"
+          }
+        ]
+      ]
+    },
+    "Record alarm": {
+      "main": [
+        [
+          {
+            "index": 0,
+            "node": "Insert alarm row",
+            "type": "main"
+          }
+        ]
+      ]
+    }
+  },
+  "name": "Inbound heartbeat",
+  "nodes": [
+    {
+      "id": "b4cff29f-0645-4fd0-a8d8-fe1b66708ae6",
+      "name": "Every morning",
+      "parameters": {
+        "rule": {
+          "interval": [
+            {
+              "field": "days",
+              "triggerAtHour": 8
+            }
+          ]
+        }
+      },
+      "position": [
+        0,
+        0
+      ],
+      "type": "n8n-nodes-base.scheduleTrigger",
+      "typeVersion": 1.4
+    },
+    {
+      "id": "7365874f-b152-411d-8041-9ff68faa0459",
+      "name": "Heartbeat constants",
+      "parameters": {
+        "assignments": {
+          "assignments": [
+            {
+              "id": "75955dad-e717-44ce-b90a-79d03155c51c",
+              "name": "quiet_hours",
+              "type": "number",
+              "value": 36
+            },
+            {
+              "id": "7a346ed2-8888-4b71-b91f-8bc35a030f58",
+              "name": "keep_days",
+              "type": "number",
+              "value": 7
+            }
+          ]
+        },
+        "options": {}
+      },
+      "position": [
+        224,
+        0
+      ],
+      "type": "n8n-nodes-base.set",
+      "typeVersion": 3.5
+    },
+    {
+      "alwaysOutputData": true,
+      "id": "9ee8cca6-95c4-4e03-ab59-191952c7ba51",
+      "name": "Find an accepted run",
+      "parameters": {
+        "dataTableId": {
+          "__rl": true,
+          "mode": "list",
+          "value": "__RUN_RECORD_TABLE_ID__"
+        },
+        "filters": {
+          "conditions": [
+            {
+              "condition": "eq",
+              "keyName": "route",
+              "keyValue": "zack"
+            },
+            {
+              "condition": "eq",
+              "keyName": "outcome",
+              "keyValue": "accepted"
+            },
+            {
+              "condition": "gt",
+              "keyName": "createdAt",
+              "keyValue": "={{ $now.minus({ hours: $json.quiet_hours }).toISO() }}"
+            }
+          ]
+        },
+        "limit": 1,
+        "matchType": "allConditions",
+        "operation": "get"
+      },
+      "position": [
+        448,
+        -112
+      ],
+      "type": "n8n-nodes-base.dataTable",
+      "typeVersion": 1.1
+    },
+    {
+      "id": "658c03a8-d750-4d84-a7b7-507ca5fd0f50",
+      "name": "Quiet too long",
+      "parameters": {
+        "conditions": {
+          "combinator": "and",
+          "conditions": [
+            {
+              "id": "addd5a4d-02ad-4e99-81f0-ada0e66503d9",
+              "leftValue": "={{ $json.id }}",
+              "operator": {
+                "operation": "notExists",
+                "singleValue": true,
+                "type": "number"
+              },
+              "rightValue": ""
+            }
+          ],
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "strict",
+            "version": 4
+          }
+        },
+        "options": {}
+      },
+      "position": [
+        672,
+        -112
+      ],
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.4
+    },
+    {
+      "id": "a5a18f62-5f21-4946-a8c5-81bd380680a4",
+      "name": "Prune old rows",
+      "parameters": {
+        "dataTableId": {
+          "__rl": true,
+          "mode": "list",
+          "value": "__RUN_RECORD_TABLE_ID__"
+        },
+        "filters": {
+          "conditions": [
+            {
+              "condition": "lt",
+              "keyName": "createdAt",
+              "keyValue": "={{ $now.minus({ days: $json.keep_days }).toISO() }}"
+            }
+          ]
+        },
+        "matchType": "allConditions",
+        "operation": "deleteRows",
+        "options": {}
+      },
+      "position": [
+        448,
+        112
+      ],
+      "type": "n8n-nodes-base.dataTable",
+      "typeVersion": 1.1
+    },
+    {
+      "id": "19c87fbd-1bba-4280-beb9-7a39318ab7ae",
+      "name": "Record alarm",
+      "parameters": {
+        "assignments": {
+          "assignments": [
+            {
+              "id": "cd382e70-e55e-4fc5-a38a-67c8cc968cfe",
+              "name": "route",
+              "type": "string",
+              "value": "alarm"
+            },
+            {
+              "id": "fd4e2859-5b1f-4b6f-94bc-57fdc5891c60",
+              "name": "outcome",
+              "type": "string",
+              "value": "inbound_quiet"
+            },
+            {
+              "id": "97b6615c-e39b-40b8-a68f-48ae9cca92d7",
+              "name": "received_at",
+              "type": "string",
+              "value": "={{ $now.toISO() }}"
+            }
+          ]
+        },
+        "options": {}
+      },
+      "position": [
+        896,
+        -112
+      ],
+      "type": "n8n-nodes-base.set",
+      "typeVersion": 3.5
+    },
+    {
+      "id": "bb4373ac-9b39-49c8-a951-ed614d44e610",
+      "name": "Insert alarm row",
+      "parameters": {
+        "columns": {
+          "attemptToConvertTypes": false,
+          "convertFieldsToString": false,
+          "mappingMode": "defineBelow",
+          "matchingColumns": [],
+          "schema": [
+            {
+              "defaultMatch": false,
+              "display": true,
+              "displayName": "received_at",
+              "id": "received_at",
+              "readOnly": false,
+              "removed": false,
+              "required": false,
+              "type": "string"
+            },
+            {
+              "defaultMatch": false,
+              "display": true,
+              "displayName": "route",
+              "id": "route",
+              "readOnly": false,
+              "removed": false,
+              "required": false,
+              "type": "string"
+            },
+            {
+              "defaultMatch": false,
+              "display": true,
+              "displayName": "outcome",
+              "id": "outcome",
+              "readOnly": false,
+              "removed": false,
+              "required": false,
+              "type": "string"
+            },
+            {
+              "defaultMatch": false,
+              "display": true,
+              "displayName": "plugin_status",
+              "id": "plugin_status",
+              "readOnly": false,
+              "removed": false,
+              "required": false,
+              "type": "number"
+            },
+            {
+              "defaultMatch": false,
+              "display": true,
+              "displayName": "duration_ms",
+              "id": "duration_ms",
+              "readOnly": false,
+              "removed": false,
+              "required": false,
+              "type": "number"
+            }
+          ],
+          "value": {
+            "duration_ms": "={{ $json.duration_ms }}",
+            "outcome": "={{ $json.outcome }}",
+            "plugin_status": "={{ $json.plugin_status }}",
+            "received_at": "={{ $json.received_at }}",
+            "route": "={{ $json.route }}"
+          }
+        },
+        "dataTableId": {
+          "__rl": true,
+          "mode": "list",
+          "value": "__RUN_RECORD_TABLE_ID__"
+        },
+        "options": {}
+      },
+      "position": [
+        1120,
+        -112
+      ],
+      "type": "n8n-nodes-base.dataTable",
+      "typeVersion": 1.1
+    },
+    {
+      "id": "3d5dee29-6ba0-42aa-a173-bff1c40ca0c6",
+      "name": "Log the alarm",
+      "parameters": {
+        "errorMessage": "={{ 'alarm ' + $json.outcome }}"
+      },
+      "position": [
+        1344,
+        -112
+      ],
+      "type": "n8n-nodes-base.stopAndError",
+      "typeVersion": 1
+    }
+  ],
+  "settings": {
+    "binaryMode": "separate",
+    "executionOrder": "v1",
+    "saveDataErrorExecution": "none",
+    "saveDataSuccessExecution": "none",
+    "saveExecutionProgress": false,
+    "saveManualExecutions": false
+  }
+}

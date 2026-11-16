@@ -2,8 +2,9 @@
 plugin's own rules for what a handle is.
 
 The template is a workflow with its values taken out: the handles and the run_record table's id
-are tokens in git, filled in on the Mac by render.py and taken out again by export.py. Stdlib
-only, and it prints nothing that holds a value.
+are tokens in git, filled in on the Mac by render.py and taken out again by export.py. The relay holds
+both tokens; the two alarm workflows hold the table's alone. Stdlib only, and it prints nothing that
+holds a value.
 """
 
 from __future__ import annotations
@@ -21,6 +22,10 @@ EXIT_REFUSED = 2
 HANDLES_TOKEN = "__ZACK_HANDLES_JSON__"
 TABLE_TOKEN = "__RUN_RECORD_TABLE_ID__"
 TOKENS = (HANDLES_TOKEN, TABLE_TOKEN)
+WEBHOOK_NODE_TYPE = "n8n-nodes-base.webhook"
+# The one workflow id a template keeps (Issue #10): the relay names Relay failed as its error workflow by
+# id, so Relay failed is imported under this one, 16 letters as n8n's own ids are.
+RELAY_FAILED_WORKFLOW_ID = "relayFailedAlarm"
 PACKAGE_NAME = "imessage_shortcuts"
 PLUGIN_DIRECTORY = Path(__file__).resolve().parent.parent / "imessage-shortcuts"
 # n8n makes a Data Table's id as it makes a workflow's: 16 characters from its NANOID_ALPHABET of
@@ -98,7 +103,18 @@ def map_string_values(node: object, transform: Callable[[str], str]) -> object:
     return node
 
 
+def required_tokens(workflow: object) -> tuple[str, ...]:
+    """The tokens *workflow* must hold: the table's always, and the handles' where a Webhook takes texts in.
+
+    The relay is the one template with a Webhook, and its routing table is the handles. The alarm
+    workflows (Issue #10) write to the table and read no handle.
+    """
+    nodes = workflow.get("nodes", []) if isinstance(workflow, dict) else []
+    takes_texts_in = any(isinstance(node, dict) and node.get("type") == WEBHOOK_NODE_TYPE for node in nodes)
+    return TOKENS if takes_texts_in else (TABLE_TOKEN,)
+
+
 def missing_tokens(workflow: object) -> list[str]:
-    """Which of the template's tokens *workflow* does not hold."""
+    """Which of the tokens *workflow* must hold it does not."""
     serialised = json.dumps(workflow)
-    return [token for token in TOKENS if token not in serialised]
+    return [token for token in required_tokens(workflow) if token not in serialised]

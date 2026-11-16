@@ -1,25 +1,53 @@
-"""The relay workflow as a template: what keeps it value-free, and its render and export scripts.
+"""The workflows as templates: what keeps each value-free, and the relay's render and export scripts.
 
-The template is the one workflow file in git, so this suite is the gate between an edit in n8n's
-editor and a repository holding a handle or a secret, or a workflow that could store a text or
-run a command. Every rule is proven by a test that breaks a copy of the template and expects
-that rule to fire. The scripts are driven as the README runs them, file to file, with no n8n
-present, under whichever python3 runs the suite.
+The templates are the workflow files in git, the relay and Issue #10's two alarm workflows, so this
+suite is the gate between an edit in n8n's editor and a repository holding a handle or a secret, or
+a workflow that could store a text or run a command. Every rule, kept in n8n_workflow_rules.py, is
+proven by a test that breaks a copy of a template and expects that rule to fire. The scripts are
+driven as the README runs them, file to file, with no n8n present, under whichever python3 runs the
+suite.
 """
 
 from __future__ import annotations
 
 import copy
 import json
-import re
 import shutil
 import stat
 import subprocess
 import sys
 import tempfile
 import unittest
+from collections.abc import Callable
 from pathlib import Path
 
+from n8n_workflow_rules import (
+    ALARM_ROUTE,
+    ALARMED_OUTCOMES,
+    CREDENTIAL_TYPE,
+    DATA_TABLE_TYPE,
+    ERROR_TRIGGER_TYPE,
+    EXPLICIT_SETTINGS,
+    FAILED_RUN_OUTCOME,
+    HAND_OFF_CONDITION,
+    HANDLES_TOKEN,
+    HTTP_REQUEST_TYPE,
+    IF_TYPE,
+    PLUGIN_CREDENTIAL,
+    RELAY_CREDENTIAL,
+    SCHEDULE_TRIGGER_TYPE,
+    SET_TYPE,
+    STOP_AND_ERROR_TYPE,
+    SWITCH_TYPE,
+    TABLE_TOKEN,
+    UUID_PATTERN,
+    WEBHOOK_TYPE,
+    assigned_values,
+    inbound_heartbeat_problems,
+    nodes_of_type,
+    relay_failed_problems,
+    relay_problems,
+)
 from support import PARTNER_PHONE, ZACK_EMAIL, ZACK_PHONE, plugin_module, write_allow_list
 
 handles = plugin_module("handles")
@@ -33,40 +61,6 @@ TIMEOUT_SECONDS = 60
 EXIT_REFUSED = 2
 OWNER_ONLY_MODE = 0o600
 RUN_RECORD_TABLE_ID = "kQ3xV9mT2bLw7ZpA"
-HANDLES_TOKEN = "__ZACK_HANDLES_JSON__"
-TABLE_TOKEN = "__RUN_RECORD_TABLE_ID__"
-RELAY_CREDENTIAL = "Shortcuts relay secret"
-PLUGIN_CREDENTIAL = "Hermes iMessage plugin secret"
-WEBHOOK_TYPE = "n8n-nodes-base.webhook"
-HTTP_REQUEST_TYPE = "n8n-nodes-base.httpRequest"
-DATA_TABLE_TYPE = "n8n-nodes-base.dataTable"
-SET_TYPE = "n8n-nodes-base.set"
-SWITCH_TYPE = "n8n-nodes-base.switch"
-CREDENTIAL_TYPE = "httpHeaderAuth"
-# The closed list from issue #8. Anything else, Code and Execute Command first, fails.
-ALLOWED_NODE_TYPES = frozenset({WEBHOOK_TYPE, SET_TYPE, SWITCH_TYPE, "n8n-nodes-base.if", HTTP_REQUEST_TYPE,
-                                DATA_TABLE_TYPE, "n8n-nodes-base.noOp"})
-EXPLICIT_SETTINGS = {"saveDataErrorExecution": "none", "saveDataSuccessExecution": "none",
-                     "saveExecutionProgress": False, "saveManualExecutions": False}
-RUN_RECORD_COLUMNS = frozenset({"received_at", "route", "outcome", "plugin_status", "duration_ms"})
-PLUGIN_URL = "http://127.0.0.1:8645/imessage"
-WEBHOOK_PATH = "imessage-relay"
-LOOPBACK_HOSTS = frozenset({"127.0.0.1", "[::1]", "localhost"})
-SECRET_HEADERS = ("x-hermes-secret", "x-relay-secret")
-SECRET_KEY_PATTERN = re.compile(r"secret|password|token|apikey", re.IGNORECASE)
-UUID_PATTERN = re.compile(r"[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}")
-PHONE_PATTERN = re.compile(r"\+?\d(?:[\s().\- ]*\d){6,}")
-EMAIL_PATTERN = re.compile(r"[^\s@'\"(),]+@[^\s@'\"(),]+\.[^\s@'\"(),]+")
-HEX_PATTERN = re.compile(r"[0-9a-fA-F]{32,}")
-URL_PATTERN = re.compile(r"https?://([^/\s'\":]+|\[[^\]\s]+\])")
-TEXT_READ_PATTERN = re.compile(r"""\.text\b|\[\s*['"]text['"]\s*\]""")
-BODY_READ_PATTERN = re.compile(r"\$json\.body\b")
-# An expression handed a whole item, which holds the text wherever a node keeps other fields, and
-# on an error output always: n8n merges the input item in (handleNodeErrorOutput in n8n-core).
-WHOLE_ITEM_READ_PATTERN = re.compile(r"(?:\$json|\.json)(?!\s*(?:\.|\?\.|\[))|\$input\b|\$items\b")
-# The one read of the body the relay may make beyond the sender: passing it through unchanged.
-PASS_THROUGH_BODY = "={{ $json.body }}"
-SENDER_READ = "$json.body.sender"
 SHAPES_OF_THE_ONE_NUMBER = ("+15550100199", "(555) 010-0199", "5550100199", "15550100199", "1 555 010 0199",
                             "555.010.0199", "  +15550100199  ", "555 010 0199")
 SHAPES_OF_THE_ONE_EMAIL = ("zack@example.com", "ZACK@Example.COM", "  zack@example.com ")
@@ -76,144 +70,12 @@ NOT_ALLOWED_SENDERS = (PARTNER_PHONE, "someone@example.com", "Zack Kuptsow", "",
 # scan-tree.sh refuses any tree it flags.
 HEX_DIGITS = "0123456789abcdef"
 RELAY_SECRET_EXAMPLE = HEX_DIGITS * 4
-
-
-def every_string(node: object, location: str = "") -> list[tuple[str, str]]:
-    """Every string in *node*, keys and values, with where it was found."""
-    if isinstance(node, str):
-        return [(location, node)]
-    if isinstance(node, dict):
-        found: list[tuple[str, str]] = []
-        for key, value in node.items():
-            found += [*every_string(key, f"{location}/<key>"), *every_string(value, f"{location}/{key}")]
-        return found
-    if isinstance(node, list):
-        return [pair for index, value in enumerate(node) for pair in every_string(value, f"{location}/{index}")]
-    return []
-
-
-def nodes_of_type(template: dict, node_type: str) -> list[dict]:
-    return [node for node in template.get("nodes", []) if node.get("type") == node_type]
-
-
-def value_problems(template: dict) -> list[str]:
-    """A string that looks like a handle, a secret, or a URL off the Mac."""
-    problems = []
-    for location, string in every_string(template):
-        without_ids = UUID_PATTERN.sub("", string)
-        if PHONE_PATTERN.search(without_ids):
-            problems.append(f"{location}: looks like a phone number")
-        if EMAIL_PATTERN.search(without_ids):
-            problems.append(f"{location}: looks like an email address")
-        if HEX_PATTERN.search(without_ids):
-            problems.append(f"{location}: looks like a secret")
-        for host in URL_PATTERN.findall(without_ids):
-            if host not in LOOPBACK_HOSTS:
-                problems.append(f"{location}: names a URL beyond the loopback address")
-    return problems
-
-
-def literal_secret_problems(node: object, location: str = "") -> list[str]:
-    """Any key that names a secret and holds a non-empty literal, anywhere under *node*."""
-    if isinstance(node, list):
-        return [problem for index, value in enumerate(node) for problem in literal_secret_problems(value, f"{location}/{index}")]
-    if not isinstance(node, dict):
-        return []
-    problems = []
-    for key, value in node.items():
-        if SECRET_KEY_PATTERN.search(key) and isinstance(value, str) and value:
-            problems.append(f"{location}/{key}: holds a literal")
-        problems += literal_secret_problems(value, f"{location}/{key}")
-    return problems
-
-
-def credential_problems(template: dict) -> list[str]:
-    """The Webhook and the HTTP Request authenticate by a credential named exactly, carrying no id."""
-    problems = literal_secret_problems(template.get("nodes", []))
-    for node_type, wanted_authentication, wanted_name in (
-            (WEBHOOK_TYPE, {"authentication": "headerAuth"}, RELAY_CREDENTIAL),
-            (HTTP_REQUEST_TYPE, {"authentication": "genericCredentialType", "genericAuthType": CREDENTIAL_TYPE}, PLUGIN_CREDENTIAL)):
-        for node in nodes_of_type(template, node_type):
-            parameters = node.get("parameters", {})
-            for key, value in wanted_authentication.items():
-                if parameters.get(key) != value:
-                    problems.append(f"{node['name']}: {key} is not the credential form")
-            reference = node.get("credentials", {}).get(CREDENTIAL_TYPE)
-            if not isinstance(reference, dict) or reference.get("name") != wanted_name:
-                problems.append(f"{node['name']}: the credential is not named {wanted_name}")
-            elif "id" in reference:
-                problems.append(f"{node['name']}: the credential reference carries an id")
-            for header in parameters.get("headerParameters", {}).get("parameters", []):
-                if str(header.get("name", "")).lower() in SECRET_HEADERS:
-                    problems.append(f"{node['name']}: a header carries a secret inline")
-    return problems
-
-
-def text_problems(template: dict) -> list[str]:
-    """The text is passed through whole and stored nowhere: nothing reads it, no column can hold it."""
-    problems = []
-    for location, string in every_string(template.get("nodes", [])):
-        if TEXT_READ_PATTERN.search(string):
-            problems.append(f"{location}: reads the text")
-        if BODY_READ_PATTERN.search(string) and string != PASS_THROUGH_BODY and SENDER_READ not in string:
-            problems.append(f"{location}: reads the body beyond passing it through")
-        if WHOLE_ITEM_READ_PATTERN.search(string):
-            problems.append(f"{location}: reads a whole item, and so the text with it")
-    for node in nodes_of_type(template, DATA_TABLE_TYPE):
-        columns = node.get("parameters", {}).get("columns", {}).get("value", {})
-        if set(columns) != RUN_RECORD_COLUMNS:
-            problems.append(f"{node['name']}: the columns are not the run record's five")
-        for location, string in every_string(columns):
-            if "body" in string:
-                problems.append(f"{node['name']}{location}: writes the body to the table")
-    return problems
-
-
-def gate_problems(template: dict) -> list[str]:
-    """The Webhook's gates and the HTTP Request's decided behaviour, each as issue #8 sets it."""
-    problems = []
-    webhooks = nodes_of_type(template, WEBHOOK_TYPE)
-    requests = nodes_of_type(template, HTTP_REQUEST_TYPE)
-    if len(webhooks) != 1 or len(requests) != 1:
-        return [f"expected one Webhook and one HTTP Request, found {len(webhooks)} and {len(requests)}"]
-    webhook = webhooks[0].get("parameters", {})
-    if webhook.get("path") != WEBHOOK_PATH:
-        problems.append("the Webhook's path is not the designed one")
-    if webhook.get("responseMode", "onReceived") != "onReceived":
-        problems.append("the Webhook does not respond immediately")
-    allowed_addresses = {entry.strip() for entry in str(webhook.get("options", {}).get("ipWhitelist", "")).split(",")}
-    if allowed_addresses != {"127.0.0.1", "::1"}:
-        problems.append("the Webhook's IP allowlist is not the loopback addresses alone")
-    request = requests[0]
-    parameters = request.get("parameters", {})
-    if parameters.get("url") != PLUGIN_URL:
-        problems.append("the HTTP Request does not post to the plugin")
-    if parameters.get("jsonBody") != PASS_THROUGH_BODY:
-        problems.append("the HTTP Request does not pass the body through unchanged")
-    options = parameters.get("options", {})
-    if options.get("timeout") != 5000:
-        problems.append("the HTTP Request's timeout is not 5 seconds")
-    response = options.get("response", {}).get("response", {})
-    if response.get("fullResponse") is not True or response.get("neverError") is not True:
-        problems.append("the HTTP Request does not return every status as an item")
-    if request.get("onError") != "continueErrorOutput":
-        problems.append("a failed connection does not reach the run record")
-    if request.get("retryOnFail"):
-        problems.append("the HTTP Request retries")
-    return problems
-
-
-def relay_problems(template: dict) -> list[str]:
-    """Why *template* may not be the relay, or nothing if it may."""
-    problems = [f"{node.get('name')}: {node.get('type')} is off the closed list" for node in template.get("nodes", [])
-                if node.get("type") not in ALLOWED_NODE_TYPES]
-    settings = template.get("settings", {})
-    problems += [f"settings: {key} is not {value!r}" for key, value in EXPLICIT_SETTINGS.items()
-                 if type(settings.get(key)) is not type(value) or settings.get(key) != value]
-    serialised = json.dumps(template)
-    problems += [f"the token {token} is missing" for token in (HANDLES_TOKEN, TABLE_TOKEN) if token not in serialised]
-    return [*problems, *value_problems(template), *credential_problems(template), *text_problems(template),
-            *gate_problems(template)]
+# Issue #10's two alarm workflows, the relay's error workflow and the heartbeat.
+RELAY_FAILED_TEMPLATE = REPOSITORY / "n8n" / "workflows" / "relay-failed.json"
+HEARTBEAT_TEMPLATE = REPOSITORY / "n8n" / "workflows" / "inbound-heartbeat.json"
+DESIGNED_QUIET_HOURS = 36
+DESIGNED_KEEP_DAYS = 7
+ALARM_TEMPLATES = ((RELAY_FAILED_TEMPLATE, relay_failed_problems), (HEARTBEAT_TEMPLATE, inbound_heartbeat_problems))
 
 
 def template_under_test() -> dict:
@@ -403,6 +265,36 @@ class RelayRuleTest(unittest.TestCase):
                 self.assert_refused(fragment)
                 self.template = original
 
+    def test_the_hand_off_to_relay_failed_set_otherwise_is_refused(self):
+        def connect(node_name: str, outputs: list[list[str]]):
+            return lambda: self.template["connections"].__setitem__(
+                node_name, {"main": [[{"index": 0, "node": target, "type": "main"} for target in output] for output in outputs]})
+
+        def stop_parameters(parameters: dict):
+            return lambda: self.node(STOP_AND_ERROR_TYPE).__setitem__("parameters", parameters)
+
+        def condition(value: str):
+            return lambda: self.node(IF_TYPE)["parameters"]["conditions"]["conditions"][0].__setitem__("leftValue", value)
+
+        breaks = [
+            ("not Relay failed's id", lambda: self.template["settings"].pop("errorWorkflow")),
+            ("not Relay failed's id", lambda: self.template["settings"].__setitem__("errorWorkflow", "anotherWorkflow1")),
+            ("four alarmed outcomes", condition(HAND_OFF_CONDITION.replace(", 'timeout'", ""))),
+            ("four alarmed outcomes", condition(HAND_OFF_CONDITION.replace("'secret_refused'", "'dropped_by_plugin'"))),
+            ("four alarmed outcomes", connect("Insert run record", [["Hand to Relay failed"]])),
+            ("true output alone", connect("Outcome to alarm on", [[], ["Hand to Relay failed"]])),
+            ("not the outcome's name", stop_parameters({"errorMessage": "={{ $json.received_at }}"})),
+            ("not the outcome's name", stop_parameters({"errorObject": "={{ $json.outcome }}", "errorType": "errorObject"})),
+            ("one Stop and Error", lambda: self.template["nodes"].append(
+                {"name": "Second stop", "parameters": {"errorMessage": "x"}, "type": STOP_AND_ERROR_TYPE})),
+        ]
+        for fragment, break_it in breaks:
+            with self.subTest(fragment):
+                original = copy.deepcopy(self.template)
+                break_it()
+                self.assert_refused(fragment)
+                self.template = original
+
 
 class SwitchExpressionTest(unittest.TestCase):
     """The Switch's expression and `handles.canonical_handle` must agree on who is who."""
@@ -490,6 +382,243 @@ class OutcomeExpressionTest(unittest.TestCase):
                                 (403, "plugin_refusing"), (503, "plugin_refusing")):
             with self.subTest(status):
                 self.assertEqual(self.evaluate(self.forward, {"statusCode": status}), outcome)
+
+    def test_the_relay_hands_the_four_failing_outcomes_to_relay_failed_and_no_other(self):
+        check = nodes_of_type(template_under_test(), IF_TYPE)[0]["parameters"]["conditions"]["conditions"][0]["leftValue"]
+        expression = check.removeprefix("={{").removesuffix("}}").strip()
+        for outcome in (*ALARMED_OUTCOMES, "accepted", "dropped", "dropped_by_plugin"):
+            with self.subTest(outcome):
+                self.assertIs(self.evaluate(expression, {"outcome": outcome}), outcome in ALARMED_OUTCOMES)
+
+    def test_relay_failed_names_the_outcome_only_when_the_message_is_exactly_one_of_the_four(self):
+        relay_failed = json.loads(RELAY_FAILED_TEMPLATE.read_text(encoding="utf-8"))
+        expression = str(assigned_values(node_named(relay_failed, "Record alarm"))["outcome"]).removeprefix("={{").removesuffix("}}").strip()
+        failed_runs = [*[({"execution": {"error": {"message": outcome}, "id": "12"}}, outcome) for outcome in ALARMED_OUTCOMES],
+                       *[({"execution": {"error": {"message": message}, "id": "12"}}, "relay_failed") for message in (
+                           "Data table with ID 'x' could not be found in this project", "plugin_refusing: hello",
+                           " timeout", "constructor", "")],
+                       ({"execution": {"id": "12"}}, "relay_failed"),
+                       ({"trigger": {"error": {"message": "timeout"}}}, "relay_failed")]
+        for item, outcome in failed_runs:
+            with self.subTest(item=item):
+                self.assertEqual(self.evaluate(expression, item), outcome)
+
+
+def node_named(template: dict, name: str) -> dict:
+    """The node called *name*."""
+    return next(node for node in template["nodes"] if node["name"] == name)
+
+
+Break = Callable[[dict], object]
+
+
+def set_field(node_name: str, field: str, value: object) -> Break:
+    """A break that sets one field of a Set node, adding it if it is not there."""
+    def break_it(template: dict) -> None:
+        assignments = node_named(template, node_name)["parameters"]["assignments"]["assignments"]
+        entry = next((entry for entry in assignments if entry["name"] == field), None)
+        if entry is None:
+            entry = {"id": "added", "name": field, "type": "string", "value": None}
+            assignments.append(entry)
+        entry["value"] = value
+    return break_it
+
+
+def set_parameter(node_name: str, *path_and_value: object) -> Break:
+    """A break that sets one parameter of a node: the keys down to it, then its value."""
+    *path, key, value = path_and_value
+
+    def break_it(template: dict) -> None:
+        parameters = node_named(template, node_name)["parameters"]
+        for step in path:
+            parameters = parameters[step]
+        parameters[key] = value
+    return break_it
+
+
+def replaced(old: str, new: str) -> Break:
+    """A break that replaces text anywhere in the template, as an edit in the editor could."""
+    def break_it(template: dict) -> None:
+        changed = json.loads(json.dumps(template).replace(old, new))
+        template.clear()
+        template.update(changed)
+    return break_it
+
+
+class AlarmTemplateTest(unittest.TestCase):
+    """Issue #10's two templates: `Relay failed`, the relay's error workflow, and `Inbound heartbeat`."""
+
+    def test_each_alarm_template_exists_and_passes_every_rule(self):
+        for path, problems_of in ALARM_TEMPLATES:
+            with self.subTest(path.name):
+                self.assertTrue(path.exists(), f"{path.name} has not been written yet")
+                self.assertEqual(problems_of(json.loads(path.read_text(encoding="utf-8"))), [])
+
+    def test_each_alarm_template_is_stored_canonically(self):
+        for path, _ in ALARM_TEMPLATES:
+            with self.subTest(path.name):
+                text = path.read_text(encoding="utf-8")
+                self.assertEqual(text, json.dumps(json.loads(text), indent=2, sort_keys=True, ensure_ascii=False) + "\n")
+
+    def test_the_heartbeats_two_constants_are_present_with_the_designs_values(self):
+        # The two numbers to tune (n8n/README.md); tuning one is an edit here too.
+        constants = assigned_values(node_named(json.loads(HEARTBEAT_TEMPLATE.read_text(encoding="utf-8")), "Heartbeat constants"))
+        self.assertEqual(constants, {"keep_days": DESIGNED_KEEP_DAYS, "quiet_hours": DESIGNED_QUIET_HOURS})
+
+    def test_each_alarm_is_a_row_on_route_alarm_naming_its_cause(self):
+        for path, outcome in ((RELAY_FAILED_TEMPLATE, FAILED_RUN_OUTCOME), (HEARTBEAT_TEMPLATE, "inbound_quiet")):
+            with self.subTest(path.name):
+                fields = assigned_values(node_named(json.loads(path.read_text(encoding="utf-8")), "Record alarm"))
+                self.assertEqual((fields["route"], fields["outcome"]), (ALARM_ROUTE, outcome))
+
+    def test_the_relay_names_relay_failed_by_the_id_relay_failed_carries(self):
+        relay_failed = json.loads(RELAY_FAILED_TEMPLATE.read_text(encoding="utf-8"))
+        self.assertEqual(template_under_test()["settings"]["errorWorkflow"], relay_failed["id"])
+        self.assertRegex(relay_failed["id"], r"^[0-9A-Za-z]{16}$", "n8n's ids are 16 letters and digits")
+
+
+class AlarmRuleTest(unittest.TestCase):
+    """Each alarm rule, seen to fire on a copy broken in the one way it refuses."""
+
+    def setUp(self):
+        self.templates = {path: json.loads(path.read_text(encoding="utf-8")) for path, _ in ALARM_TEMPLATES}
+        for path, problems_of in ALARM_TEMPLATES:
+            self.assertEqual(problems_of(self.templates[path]), [], "each copy must start clean, or nothing below shows a rule fired")
+
+    def assert_each_refused(self, breaks: list[tuple[str, Break]], paths: tuple[Path, ...] = (RELAY_FAILED_TEMPLATE, HEARTBEAT_TEMPLATE)) -> None:
+        """Each break, made to a fresh copy of each template in *paths*, raises a problem naming its fragment."""
+        for path, problems_of in ALARM_TEMPLATES:
+            for fragment, break_it in breaks if path in paths else ():
+                with self.subTest(template=path.name, fragment=fragment):
+                    broken = copy.deepcopy(self.templates[path])
+                    break_it(broken)
+                    problems = problems_of(broken)
+                    self.assertTrue(any(fragment in problem for problem in problems), f"no problem names {fragment!r}: {problems}")
+
+    def test_what_the_relays_rules_refuse_is_refused_in_both(self):
+        def add_node(node_type: str):
+            return lambda template: template["nodes"].append({"name": "Added", "parameters": {}, "type": node_type})
+
+        def change_setting(key: str, value: object):
+            return lambda template: template["settings"].__setitem__(key, value)
+
+        def add_credential(template: dict) -> None:
+            node_named(template, "Insert alarm row")["credentials"] = {CREDENTIAL_TYPE: {"name": PLUGIN_CREDENTIAL}}
+
+        self.assert_each_refused([
+            *[("off the closed list", add_node(node_type)) for node_type in (
+                "n8n-nodes-base.code", "n8n-nodes-base.executeCommand", HTTP_REQUEST_TYPE, WEBHOOK_TYPE)],
+            *[(key, change_setting(key, value)) for key, value in (
+                ("saveDataErrorExecution", "all"), ("saveDataSuccessExecution", "DEFAULT"), ("saveManualExecutions", True),
+                ("saveExecutionProgress", True))],
+            ("saveManualExecutions", lambda template: template["settings"].pop("saveManualExecutions")),
+            ("phone number", set_field("Record alarm", "received_at", ZACK_PHONE)),
+            ("email address", set_field("Record alarm", "received_at", ZACK_EMAIL)),
+            ("secret", set_field("Record alarm", "received_at", RELAY_SECRET_EXAMPLE)),
+            ("beyond the loopback address", set_field("Record alarm", "received_at", "https://household.example.net/ingest")),
+            ("holds a credential", add_credential),
+            ("holds a literal", set_parameter("Insert alarm row", "options", "password", "literal")),
+            ("reads the text", set_field("Record alarm", "received_at", "={{ $json.body.text }}")),
+            ("beyond passing it through", set_field("Record alarm", "received_at", "={{ $json.body.sent_at }}")),
+            ("whole item", set_field("Record alarm", "received_at", "={{ JSON.stringify($json) }}")),
+            ("run record's five", set_parameter("Insert alarm row", "columns", "value", "note", "={{ $json.note }}")),
+        ])
+
+    def test_an_alarm_is_only_a_fixed_name_on_route_alarm_in_run_record(self):
+        def second_trigger(template: dict) -> None:
+            template["nodes"].append({"name": "Second trigger", "parameters": {}, "type": ERROR_TRIGGER_TYPE})
+            template["nodes"].append({"name": "Third trigger", "parameters": {}, "type": SCHEDULE_TRIGGER_TYPE})
+
+        self.assert_each_refused([
+            ("route other than alarm", set_field("Record alarm", "route", "zack")),
+            ("not a fixed name", set_field("Record alarm", "outcome", "={{ $json.outcome }}")),
+            ("not a fixed name", set_field("Record alarm", "outcome", "Relay failed: plugin answered 503")),
+            (f"the token {TABLE_TOKEN} is missing", replaced(TABLE_TOKEN, RUN_RECORD_TABLE_ID)),
+            ("routing table", set_field("Record alarm", "zack_handles", HANDLES_TOKEN)),
+            ("the one trigger", second_trigger),
+            *[(f"the Data table's {name}", set_parameter("Insert alarm row", *path)) for name, path in (
+                ("update", ("operation", "update")), ("upsert", ("operation", "upsert")), ("rowExists", ("operation", "rowExists")))],
+            ("the Data table's table delete", lambda template: node_named(template, "Insert alarm row")["parameters"].update(
+                {"operation": "delete", "resource": "table"})),
+            ("the Data table's table clear", lambda template: node_named(template, "Insert alarm row")["parameters"].update(
+                {"operation": "clear", "resource": "table"})),
+        ])
+
+    def test_the_error_workflow_reads_nothing_of_the_failed_run_but_its_id(self):
+        self.assert_each_refused([("more of the failed run than its id", set_field("Record alarm", "received_at", expression))
+                                  for expression in ("={{ $json.execution.error.message }}", "={{ $json.execution.lastNodeExecuted }}",
+                                                     "={{ $json.workflow.name }}", "={{ $json['execution']['error'] }}",
+                                                     "={{ $json.execution.url }}", "={{ $json.trigger.error }}",
+                                                     "={{ $('A relay run failed').first().json.execution.error.stack }}")],
+                                 paths=(RELAY_FAILED_TEMPLATE,))
+
+    def test_the_failed_runs_id_may_be_read(self):
+        template = copy.deepcopy(self.templates[RELAY_FAILED_TEMPLATE])
+        set_field("Record alarm", "received_at", "={{ $json.execution.id }}")(template)
+        self.assertEqual(relay_failed_problems(template), [])
+
+    def test_each_alarm_row_is_followed_by_its_log_line_and_nothing_else_fails(self):
+        def drop_log_line(template: dict) -> None:
+            template["nodes"].remove(node_named(template, "Log the alarm"))
+            template["connections"].pop("Insert alarm row")
+
+        self.assert_each_refused([
+            ("not followed by a Stop and Error", drop_log_line),
+            ("not followed by a Stop and Error", lambda template: template["connections"]["Record alarm"]["main"][0][0].__setitem__(
+                "node", "Log the alarm")),
+            ("two words", set_parameter("Log the alarm", "errorMessage", "alarm")),
+            ("two words", set_parameter("Log the alarm", "errorMessage", "={{ 'alarm ' + $json.execution.error.message }}")),
+            ("two words", lambda template: node_named(template, "Log the alarm")["parameters"].update(
+                {"errorObject": "={{ $json }}", "errorType": "errorObject"})),
+        ])
+
+    def test_relay_failed_carries_its_id_and_names_its_outcome_from_the_four_alone(self):
+        self.assert_each_refused([
+            ("fixed id", lambda template: template.pop("id")),
+            ("fixed id", lambda template: template.__setitem__("id", "aDifferentId1234")),
+            ("matched against the four alarmed names", set_field("Record alarm", "outcome", "relay_failed")),
+            ("matched against the four alarmed names", set_field("Record alarm", "outcome", FAILED_RUN_OUTCOME.replace(
+                ", 'timeout'", ""))),
+        ], paths=(RELAY_FAILED_TEMPLATE,))
+
+    def test_each_question_the_heartbeat_asks_set_otherwise_is_refused(self):
+        def connect(node_name: str, outputs: list[list[str]]):
+            return lambda template: template["connections"].__setitem__(
+                node_name, {"main": [[{"index": 0, "node": target, "type": "main"} for target in output] for output in outputs]})
+
+        week = "={{ $now.minus({ days: $json.keep_days }).toISO() }}"
+        window = "={{ $now.minus({ hours: $json.quiet_hours }).toISO() }}"
+        prune = ("Prune old rows", "filters", "conditions")
+        find = ("Find an accepted run", "filters", "conditions")
+        self.assert_each_refused([
+            ("every morning", set_parameter("Every morning", "rule", "interval", [{"field": "days", "triggerAtHour": 20}])),
+            ("every morning", set_parameter("Every morning", "rule", "interval", [{"field": "hours", "hoursInterval": 1}])),
+            ("two constants", lambda template: node_named(template, "Heartbeat constants")["parameters"]["assignments"]["assignments"].pop()),
+            ("two constants", set_field("Heartbeat constants", "quiet_hours", "36")),
+            ("two constants", set_field("Heartbeat constants", "keep_days", 0)),
+            ("two constants", set_field("Heartbeat constants", "route", "zack")),
+            ("both questions", connect("Heartbeat constants", [["Find an accepted run"]])),
+            *[("older than the days kept", set_parameter(*prune, conditions)) for conditions in (
+                [{"condition": "gt", "keyName": "createdAt", "keyValue": week}],
+                [{"condition": "lt", "keyName": "updatedAt", "keyValue": week}],
+                [{"condition": "lt", "keyName": "createdAt", "keyValue": window}],
+                [{"condition": "lt", "keyName": "createdAt", "keyValue": week}, {"keyName": "route", "keyValue": "zack"}],
+                [])],
+            *[("inside the quiet hours", set_parameter(*find, conditions)) for conditions in (
+                [{"keyName": "route", "keyValue": "zack"}, {"keyName": "outcome", "keyValue": "dropped_by_plugin"},
+                 {"condition": "gt", "keyName": "createdAt", "keyValue": window}],
+                [{"keyName": "outcome", "keyValue": "accepted"}, {"condition": "gt", "keyName": "createdAt", "keyValue": window}],
+                [{"keyName": "route", "keyValue": "zack"}, {"keyName": "outcome", "keyValue": "accepted"}],
+                [{"keyName": "route", "keyValue": "zack"}, {"keyName": "outcome", "keyValue": "accepted"},
+                 {"condition": "gt", "keyName": "createdAt", "keyValue": week}])],
+            ("inside the quiet hours", set_parameter("Find an accepted run", "matchType", "anyCondition")),
+            ("could never alarm", lambda template: node_named(template, "Find an accepted run").pop("alwaysOutputData")),
+            ("whether it found nothing", set_parameter("Quiet too long", "conditions", "conditions", 0, "operator",
+                                                        {"operation": "exists", "singleValue": True, "type": "number"})),
+            ("whether it found nothing", set_parameter("Quiet too long", "conditions", "conditions", 0, "leftValue", "={{ $json.route }}")),
+            ("true output alone", connect("Quiet too long", [[], ["Record alarm"]])),
+            ("true output alone", connect("Quiet too long", [["Record alarm"], ["Record alarm"]])),
+        ], paths=(HEARTBEAT_TEMPLATE,))
 
 
 class ScriptTest(unittest.TestCase):
@@ -783,6 +912,66 @@ class ExportTest(ScriptTest):
         result = self.export(self.exported, self.template_out)
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assert_no_value_printed(result)
+
+
+class AlarmScriptTest(ScriptTest):
+    """render.py and export.py on Issue #10's two templates, which hold the table's token and no handle."""
+
+    def rendered_copy(self, path: Path) -> Path:
+        out = self.scratch / f"rendered-{path.name}"
+        result = self.render(template=path, out=out)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        return out
+
+    def test_render_fills_the_table_and_keeps_relay_faileds_id(self):
+        for path, _ in ALARM_TEMPLATES:
+            with self.subTest(path.name):
+                text = self.rendered_copy(path).read_text(encoding="utf-8")
+                self.assertIn(RUN_RECORD_TABLE_ID, text)
+                self.assertNotIn("__", text.replace("__rl", ""))
+                self.assertEqual(json.loads(text).get("id"), json.loads(path.read_text(encoding="utf-8")).get("id"))
+
+    def test_render_refuses_an_alarm_template_without_the_table_token(self):
+        for path, _ in ALARM_TEMPLATES:
+            with self.subTest(path.name):
+                broken = self.scratch / f"broken-{path.name}"
+                broken.write_text(path.read_text(encoding="utf-8").replace(TABLE_TOKEN, "x"), encoding="utf-8")
+                result = self.render(template=broken, out=self.scratch / f"out-{path.name}")
+                self.assert_refused(result)
+                self.assertIn(TABLE_TOKEN, result.stderr)
+
+    def test_a_template_that_takes_texts_in_must_hold_the_routing_table(self):
+        template = json.loads(HEARTBEAT_TEMPLATE.read_text(encoding="utf-8"))
+        template["nodes"].append({"name": "Webhook", "parameters": {}, "type": WEBHOOK_TYPE})
+        broken = self.scratch / "with-a-webhook.json"
+        broken.write_text(json.dumps(template), encoding="utf-8")
+        result = self.render(template=broken)
+        self.assert_refused(result)
+        self.assertIn(HANDLES_TOKEN, result.stderr)
+
+    def test_render_then_export_leaves_each_alarm_template_byte_identical(self):
+        # The heartbeat's instance id goes; Relay failed's fixed one, which the relay names it by, stays.
+        for path, _ in ALARM_TEMPLATES:
+            with self.subTest(path.name):
+                workflow = json.loads(self.rendered_copy(path).read_text(encoding="utf-8"))
+                workflow.update({"active": True, "createdAt": "2026-11-16T10:00:00.000Z", "id": workflow.get("id", "hEaRtBeAtWfId123"),
+                                 "someFutureInstanceKey": "its-value", "versionId": "version-one"})
+                for node in nodes_of_type(workflow, DATA_TABLE_TYPE):
+                    node["parameters"]["dataTableId"].update({"cachedResultName": "run_record",
+                                                              "cachedResultUrl": f"/projects/x/datatables/{RUN_RECORD_TABLE_ID}"})
+                exported, template_out = self.scratch / f"exported-{path.name}", self.scratch / f"template-{path.name}"
+                exported.write_text(json.dumps([workflow]), encoding="utf-8")
+                result = self.export(exported, template_out)
+                self.assertEqual(result.returncode, 0, result.stderr)
+                self.assertEqual(template_out.read_bytes(), path.read_bytes())
+
+    def test_relay_failed_exported_under_another_id_loses_it(self):
+        workflow = json.loads(self.rendered_copy(RELAY_FAILED_TEMPLATE).read_text(encoding="utf-8"))
+        workflow["id"] = "sOmEoThErWfId123"
+        exported, template_out = self.scratch / "exported.json", self.scratch / "template.json"
+        exported.write_text(json.dumps([workflow]), encoding="utf-8")
+        self.assertEqual(self.export(exported, template_out).returncode, 0)
+        self.assertNotIn("id", json.loads(template_out.read_text(encoding="utf-8")))
 
 
 if __name__ == "__main__":

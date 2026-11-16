@@ -22,6 +22,8 @@ REPOSITORY = Path(__file__).resolve().parent.parent
 IMPORT_SCRIPT = REPOSITORY / "n8n" / "import.sh"
 CLI_SCRIPT = REPOSITORY / "n8n" / "n8n-cli.sh"
 FIXTURE_TEMPLATE = REPOSITORY / "tests" / "fixtures" / "n8n-relay-template.json"
+WORKFLOWS = REPOSITORY / "n8n" / "workflows"
+ALARM_TEMPLATES = {"relay-failed.json": "Relay failed", "inbound-heartbeat.json": "Inbound heartbeat"}
 BASH = "/bin/bash"
 EXIT_REFUSED = 3
 TIMEOUT_SECONDS = 60
@@ -44,13 +46,15 @@ run_n8n() {{
     import:workflow)
       cp "${{2#--input=}}" "$SCRATCH/seen-by-n8n.json"
       [[ ! -f "$SCRATCH/import-fails" ]] || return 1
-      [[ -f "$SCRATCH/import-adds-nothing" ]] || printf '%s\n' '{NEW_WORKFLOW_ID}|iMessage relay' >>"$SCRATCH/workflows"
+      [[ -f "$SCRATCH/import-adds-nothing" ]] \
+        || printf '%s|%s\n' '{NEW_WORKFLOW_ID}' "$(python3 -c 'import json, sys; print(json.load(open(sys.argv[1]))["name"])' \
+          "$SCRATCH/seen-by-n8n.json")" >>"$SCRATCH/workflows"
       ;;
   esac
 }}
 N8N_HOME="$SCRATCH/n8n-home"
 HANDLE_FILE="$SCRATCH/zack-handles.txt"
-TEMPLATE="{FIXTURE_TEMPLATE}"
+WORKFLOWS_DIR="$SCRATCH/workflows-dir"
 """
 CLI_STAND_INS = r"""
 sudo() {
@@ -78,6 +82,12 @@ class ImportTest(ShellTest):
         super().setUp()
         (self.scratch / "n8n-home").mkdir()
         (self.scratch / "private-temporary").mkdir()
+        # The relay is the fixture; the two alarm workflows are the real templates, which hold no handle.
+        workflows = self.scratch / "workflows-dir"
+        workflows.mkdir()
+        shutil.copyfile(FIXTURE_TEMPLATE, workflows / "imessage-relay.json")
+        for name in ALARM_TEMPLATES:
+            shutil.copyfile(WORKFLOWS / name, workflows / name)
         write_allow_list(self.scratch, ZACK_PHONE, ZACK_EMAIL)
 
     def run_import(self, arguments: str = RUN_RECORD_TABLE_ID) -> subprocess.CompletedProcess[str]:
@@ -191,6 +201,39 @@ class ImportTest(ShellTest):
         result = subprocess.run([BASH, str(IMPORT_SCRIPT)], capture_output=True, text=True, timeout=TIMEOUT_SECONDS, check=False)
         self.assertEqual(result.returncode, EXIT_REFUSED, result.stdout)
         self.assertIn("usage", result.stderr)
+
+    def test_each_alarm_workflow_is_handed_over_with_the_table_and_no_handle(self):
+        for which, (name, workflow_name) in zip(("relay-failed", "inbound-heartbeat"), ALARM_TEMPLATES.items()):
+            with self.subTest(which):
+                (self.scratch / "workflows").unlink(missing_ok=True)
+                result = self.run_import(f"{RUN_RECORD_TABLE_ID} {which}")
+                self.assertEqual(result.returncode, 0, result.stderr)
+                seen = json.loads((self.scratch / "seen-by-n8n.json").read_text(encoding="utf-8"))
+                self.assertEqual(seen["name"], workflow_name)
+                self.assertEqual(seen.get("id"), json.loads((WORKFLOWS / name).read_text(encoding="utf-8")).get("id"))
+                self.assertIn(RUN_RECORD_TABLE_ID, json.dumps(seen))
+                for value in (ZACK_PHONE, ZACK_EMAIL):
+                    self.assertNotIn(value, json.dumps(seen))
+                self.assertIn(NEW_WORKFLOW_ID, result.stdout)
+                self.assertIn("Publish", result.stdout)
+                self.assertEqual(self.leftovers(), [])
+
+    def test_an_alarm_workflow_already_there_is_refused_and_a_relay_there_is_no_reason_to(self):
+        (self.scratch / "workflows").write_text(f"{EXISTING_WORKFLOW}\noLdAlArM|Relay failed\n", encoding="utf-8")
+        refused = self.run_import(f"{RUN_RECORD_TABLE_ID} relay-failed")
+        self.assertEqual(refused.returncode, EXIT_REFUSED, refused.stdout)
+        self.assertIn("'Relay failed' already exists", refused.stderr)
+        self.assertEqual(self.imported_calls(), [])
+        imported = self.run_import(f"{RUN_RECORD_TABLE_ID} inbound-heartbeat")
+        self.assertEqual(imported.returncode, 0, imported.stderr)
+
+    def test_a_workflow_it_does_not_know_is_refused_with_its_usage(self):
+        for arguments in (f"{RUN_RECORD_TABLE_ID} heartbeat", f"{RUN_RECORD_TABLE_ID} relay extra"):
+            with self.subTest(arguments):
+                result = self.run_import(arguments)
+                self.assertEqual(result.returncode, EXIT_REFUSED, result.stdout)
+                self.assertIn("relay-failed|inbound-heartbeat", result.stderr)
+                self.assertEqual(self.calls(), [])
 
 
 class CliTest(ShellTest):

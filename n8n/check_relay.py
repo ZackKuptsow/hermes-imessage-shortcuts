@@ -5,10 +5,14 @@ Usage: check_relay.py [--break {wrong-header,ip-allowlist,routing-table}]
 
 Renders the relay template under its own name, webhook path and credentials, aimed at a stand-in
 plugin on a free port, and writing to a second Data Table, `run_record_check`, so the real relay,
-its table, its secrets and the plugin on 8645 are never touched. It posts each case and reads the
-row each leaves, then removes everything it made. The senders are made up and the secrets random
-for each run, so it never reads your handle file or your secrets, and it prints no secret, handle
-or body. With --break it breaks one gate on purpose: that run should go red.
+its table, its secrets and the plugin on 8645 are never touched. Beside it goes a copy of Relay
+failed under its own name and id, which the check's relay names as its error workflow, writing its
+alarms to the same table, and a third copy of the relay writing to a table that is not there, so
+that one post makes a run throw. It posts each case and reads the rows each leaves, the alarm row
+among them, and the line each alarm puts in n8n's log, then removes everything it made. The senders
+are made up and the secrets random for each run, so it never reads your handle file or your secrets,
+and it prints no secret, handle, body or log line. With --break it breaks one gate on purpose: that
+run should go red.
 
 It publishes through n8n's CLI and lets the running daemon pick that up, which its reconciler does
 within about half a minute, so n8n is never restarted and the real relay keeps serving through a
@@ -41,10 +45,12 @@ EXIT_FAILED = 1
 EXIT_BREAK_UNNOTICED = 3
 SCRIPT_DIRECTORY = Path(__file__).resolve().parent
 RELAY_TEMPLATE = SCRIPT_DIRECTORY / "workflows" / "imessage-relay.json"
+RELAY_FAILED_TEMPLATE = SCRIPT_DIRECTORY / "workflows" / "relay-failed.json"
 CLI_SCRIPT = SCRIPT_DIRECTORY / "n8n-cli.sh"
 N8N_USER = "_n8n"
 N8N_HOME = "/var/n8n"
 DATABASE_PATH = "/var/n8n/.n8n/database.sqlite"
+LOG_PATH = "/var/n8n/log/n8n.log"
 SQLITE_PATH = "/usr/bin/sqlite3"
 SQLITE_BUSY_WAIT = ".timeout 5000"
 HAND_OVER_FOLDER_PREFIX = "check."
@@ -59,6 +65,19 @@ CHECK_TABLE_COLUMNS = {"duration_ms": "number", "outcome": "string", "plugin_sta
                        "route": "string"}
 CHECK_WORKFLOW_NAME = "iMessage relay check"
 CHECK_WORKFLOW_ID = "relayCheckWrkflw"
+# The check's Relay failed, which its relay names by this id, so the real one never hears of a check.
+CHECK_ALARM_WORKFLOW_NAME = "Relay failed check"
+CHECK_ALARM_WORKFLOW_ID = "relayFailedCheck"
+# The check's relay once more, writing to a table that is not there, so its run throws as the real
+# relay's would with run_record gone: the one way to see Relay failed's catch-all, relay_failed, since
+# the relay copes with any body it can be posted (seen at the Mac on 2026-11-16).
+CHECK_TABLE_GONE_WORKFLOW_NAME = "iMessage relay check, table gone"
+CHECK_TABLE_GONE_WORKFLOW_ID = "relayCheckNoTabl"
+CHECK_TABLE_GONE_WEBHOOK_PATH = "imessage-relay-check-table-gone"
+CHECK_TABLE_GONE_WEBHOOK_URL = f"http://127.0.0.1:5678/webhook/{CHECK_TABLE_GONE_WEBHOOK_PATH}"
+MISSING_TABLE_ID = "checkTableIsGone"
+CHECK_WORKFLOW_IDS = (CHECK_WORKFLOW_ID, CHECK_ALARM_WORKFLOW_ID, CHECK_TABLE_GONE_WORKFLOW_ID)
+CHECK_WORKFLOW_IDS_SQL = ", ".join(f"'{identifier}'" for identifier in CHECK_WORKFLOW_IDS)
 CHECK_WEBHOOK_PATH = "imessage-relay-check"
 CHECK_WEBHOOK_URL = f"http://127.0.0.1:5678/webhook/{CHECK_WEBHOOK_PATH}"
 CHECK_RELAY_CREDENTIAL = "Relay check relay secret"
@@ -105,6 +124,12 @@ SECRET_WRONG = "wrong"
 SECRET_RIGHT = "right"
 ROUTE_ZACK = "zack"
 ROUTE_DROPPED = "dropped"
+ROUTE_ALARM = "alarm"
+# What the stand-in sends instead of an answer when a case asks for garbage: not HTTP at all.
+GARBAGE_ANSWER = b"not an HTTP answer\r\n\r\n"
+# A JSON body with no sender in it. The relay drops it and raises nothing: every expression it runs
+# copes with any JSON at all, so no post makes its run throw (seen at the Mac on 2026-11-16).
+SENDERLESS_BODY = b"null"
 
 Report = Callable[[str], None]
 
@@ -127,7 +152,8 @@ class Timing:
 
 @dataclass(frozen=True)
 class Case:
-    """One post, and everything it should leave behind. No expected route means no row at all."""
+    """One post, and everything it should leave behind. No expected route means no relay row at all,
+    and no expected alarm no alarm row."""
 
     name: str
     secret: str
@@ -140,24 +166,40 @@ class Case:
     stand_in_up: bool = True
     answer_status: int = ACCEPTED_STATUS
     answer_delay_seconds: float = 0.0
+    expected_alarm: str | None = None
+    answers_garbage: bool = False
+    posts_senderless_body: bool = False
+    posts_to_table_gone: bool = False
 
 
 def relay_cases(timing: Timing) -> tuple[Case, ...]:
-    """Every case the design names, and the rest of the outcome mapping."""
+    """Every case the design names, the rest of the outcome mapping, and the alarm each raises.
+
+    The four failing outcomes alarm under their own names and the three others not at all (Issue #10).
+    """
     return (
         Case("no secret", SECRET_NONE, KNOWN_SENDER, FORBIDDEN_STATUS),
         Case("wrong secret", SECRET_WRONG, KNOWN_SENDER, FORBIDDEN_STATUS),
         Case("unknown sender", SECRET_RIGHT, UNKNOWN_SENDER, RECEIVED_STATUS, ROUTE_DROPPED, "dropped"),
-        Case("plugin unreachable", SECRET_RIGHT, KNOWN_SENDER, RECEIVED_STATUS, ROUTE_ZACK, "plugin_unreachable", stand_in_up=False),
+        Case("plugin unreachable", SECRET_RIGHT, KNOWN_SENDER, RECEIVED_STATUS, ROUTE_ZACK, "plugin_unreachable", stand_in_up=False,
+             expected_alarm="plugin_unreachable"),
         Case("accepted", SECRET_RIGHT, KNOWN_SENDER, RECEIVED_STATUS, ROUTE_ZACK, "accepted", ACCEPTED_STATUS, reaches_plugin=True),
         Case("dropped by the plugin", SECRET_RIGHT, KNOWN_SENDER, RECEIVED_STATUS, ROUTE_ZACK, "dropped_by_plugin", DROPPED_STATUS,
              reaches_plugin=True, answer_status=DROPPED_STATUS),
         Case("refused secret", SECRET_RIGHT, KNOWN_SENDER, RECEIVED_STATUS, ROUTE_ZACK, "secret_refused", UNAUTHORIZED_STATUS,
-             reaches_plugin=True, answer_status=UNAUTHORIZED_STATUS),
+             reaches_plugin=True, answer_status=UNAUTHORIZED_STATUS, expected_alarm="secret_refused"),
         Case("plugin refusing", SECRET_RIGHT, KNOWN_SENDER, RECEIVED_STATUS, ROUTE_ZACK, "plugin_refusing", NOT_SERVING_STATUS,
-             reaches_plugin=True, answer_status=NOT_SERVING_STATUS),
+             reaches_plugin=True, answer_status=NOT_SERVING_STATUS, expected_alarm="plugin_refusing"),
+        Case("plugin refusing with a 400", SECRET_RIGHT, KNOWN_SENDER, RECEIVED_STATUS, ROUTE_ZACK, "plugin_refusing", MALFORMED_STATUS,
+             reaches_plugin=True, answer_status=MALFORMED_STATUS, expected_alarm="plugin_refusing"),
+        Case("plugin refusing with a 403", SECRET_RIGHT, KNOWN_SENDER, RECEIVED_STATUS, ROUTE_ZACK, "plugin_refusing", FORBIDDEN_STATUS,
+             reaches_plugin=True, answer_status=FORBIDDEN_STATUS, expected_alarm="plugin_refusing"),
         Case("timeout", SECRET_RIGHT, KNOWN_SENDER, RECEIVED_STATUS, ROUTE_ZACK, "timeout", reaches_plugin=True,
-             answer_delay_seconds=timing.slow_answer_seconds),
+             answer_delay_seconds=timing.slow_answer_seconds, expected_alarm="timeout"),
+        Case("garbage from the plugin", SECRET_RIGHT, KNOWN_SENDER, RECEIVED_STATUS, ROUTE_ZACK, "plugin_unreachable", reaches_plugin=True,
+             answers_garbage=True, expected_alarm="plugin_unreachable"),
+        Case("a body with no sender", SECRET_RIGHT, KNOWN_SENDER, RECEIVED_STATUS, ROUTE_DROPPED, "dropped", posts_senderless_body=True),
+        Case("table gone", SECRET_RIGHT, UNKNOWN_SENDER, RECEIVED_STATUS, posts_to_table_gone=True, expected_alarm="relay_failed"),
     )
 
 
@@ -168,6 +210,7 @@ class StandInPlugin:
         self.received: list[bytes] = []
         self.answer_status = ACCEPTED_STATUS
         self.answer_delay_seconds = 0.0
+        self.answers_garbage = False
         self.presented_secrets: list[str | None] = []
         self.port = 0
         self._server: http.server.ThreadingHTTPServer | None = None
@@ -192,6 +235,10 @@ class StandInPlugin:
                 time.sleep(stand_in.answer_delay_seconds)
                 status = MALFORMED_STATUS if len(body) > PLUGIN_BODY_LIMIT_BYTES else stand_in.answer_status
                 try:
+                    if stand_in.answers_garbage:
+                        self.close_connection = True
+                        self.wfile.write(GARBAGE_ANSWER)
+                        return
                     self.send_response(status)
                     self.send_header("Content-Length", "0")
                     self.end_headers()
@@ -253,8 +300,34 @@ def build_check_workflow(template: dict, stand_in_url: str, table_id: str, gate_
     request = the_one_node(workflow, HTTP_REQUEST_TYPE)
     request["parameters"]["url"] = stand_in_url
     request["credentials"][CREDENTIAL_TYPE] = {"id": CHECK_PLUGIN_CREDENTIAL_ID, "name": CHECK_PLUGIN_CREDENTIAL}
+    workflow.setdefault("settings", {})["errorWorkflow"] = CHECK_ALARM_WORKFLOW_ID
     if REAL_PLUGIN_ADDRESS in json.dumps(workflow):
         raise CheckError("the check's workflow would still post to the real plugin")
+    if workflow_template.RELAY_FAILED_WORKFLOW_ID in json.dumps(workflow):
+        raise CheckError("the check's workflow would still hand its failures to the real Relay failed")
+    return workflow
+
+
+def build_table_gone_workflow(template: dict, stand_in_url: str, gate_broken: str | None) -> dict:
+    """The check's relay under a third name, id and path, writing to a table that is not there."""
+    workflow = build_check_workflow(template, stand_in_url, MISSING_TABLE_ID, gate_broken)
+    workflow["name"] = CHECK_TABLE_GONE_WORKFLOW_NAME
+    workflow["id"] = CHECK_TABLE_GONE_WORKFLOW_ID
+    the_one_node(workflow, WEBHOOK_TYPE)["parameters"]["path"] = CHECK_TABLE_GONE_WEBHOOK_PATH
+    return workflow
+
+
+def build_check_alarm_workflow(template: dict, table_id: str) -> dict:
+    """Relay failed under its own name and id, writing its alarms to the check's table.
+
+    Raises:
+        CheckError: anything still names the real Relay failed's id.
+    """
+    workflow = render.render_workflow(copy.deepcopy(template), (KNOWN_SENDER,), table_id)
+    workflow["name"] = CHECK_ALARM_WORKFLOW_NAME
+    workflow["id"] = CHECK_ALARM_WORKFLOW_ID
+    if workflow_template.RELAY_FAILED_WORKFLOW_ID in json.dumps(workflow):
+        raise CheckError("the check's Relay failed would still be the real one")
     return workflow
 
 
@@ -304,21 +377,28 @@ def wait_for_webhook(url: str, timing: Timing) -> None:
     raise CheckError(f"the check's webhook did not register within {timing.webhook_wait_seconds:g}s; it last answered {last_status}")
 
 
-def wait_for_new_rows(instance: object, rows_before: int, timing: Timing) -> list[dict]:
-    """Whatever rows have appeared since *rows_before*, once one has or the wait runs out."""
+def wait_for_new_rows(instance: object, rows_before: int, timing: Timing, wanted: int = 1) -> list[dict]:
+    """Whatever rows have appeared since *rows_before*, once *wanted* have or the wait runs out."""
     deadline = time.monotonic() + timing.row_wait_seconds
     while time.monotonic() < deadline:
         rows = instance.rows()
-        if len(rows) > rows_before:
-            # Long enough for a second row to show up, which would be its own failure.
+        if len(rows) >= rows_before + wanted:
+            # Long enough for one more row to show up, which would be its own failure.
             time.sleep(timing.settle_seconds)
             return instance.rows()[rows_before:]
         time.sleep(timing.poll_seconds)
-    return []
+    return instance.rows()[rows_before:]
 
 
 def row_problems(case: Case, new_rows: list[dict]) -> list[str]:
-    """What is wrong with the rows *case* left. Names fields, and never prints a value of a body."""
+    """What is wrong with the rows *case* left, relay row and alarm row apart."""
+    relay_rows = [row for row in new_rows if row.get("route") != ROUTE_ALARM]
+    alarm_rows = [row for row in new_rows if row.get("route") == ROUTE_ALARM]
+    return [*relay_row_problems(case, relay_rows), *alarm_row_problems(case, alarm_rows)]
+
+
+def relay_row_problems(case: Case, new_rows: list[dict]) -> list[str]:
+    """What is wrong with the relay's own rows. Names fields, and never prints a value of a body."""
     if case.expected_route is None:
         return [f"expected no row, found {len(new_rows)}"] if new_rows else []
     if len(new_rows) != 1:
@@ -338,44 +418,93 @@ def row_problems(case: Case, new_rows: list[dict]) -> list[str]:
     return problems
 
 
+def alarm_row_problems(case: Case, alarm_rows: list[dict]) -> list[str]:
+    """What is wrong with the alarm rows: one naming its cause where the case alarms, none elsewhere."""
+    if case.expected_alarm is None:
+        return [f"expected no alarm row, found {len(alarm_rows)}"] if alarm_rows else []
+    if len(alarm_rows) != 1:
+        return [f"expected one alarm row, found {len(alarm_rows)}"]
+    row = alarm_rows[0]
+    problems = [] if row.get("outcome") == case.expected_alarm else [f"the alarm's outcome was not {case.expected_alarm}"]
+    if not row.get("received_at"):
+        problems.append("the alarm's received_at is empty")
+    if row.get("plugin_status") is not None or row.get("duration_ms") is not None:
+        problems.append("the alarm row holds a field of the relay's")
+    if CHECK_TEXT in json.dumps(row, ensure_ascii=False):
+        problems.append("the text reached the alarm row")
+    return problems
+
+
+def alarm_log_lines(log_text: str, outcome: str) -> int:
+    """How many lines of n8n's log are the alarm's own: an error whose message is `alarm <outcome>`,
+    perhaps with the execution or the stack n8n adds after it. Reads no other line's message out."""
+    wanted = f"alarm {outcome}"
+    found = 0
+    for line in log_text.splitlines():
+        try:
+            entry = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+        if not isinstance(entry, dict):
+            continue
+        message = entry.get("message")
+        if entry.get("level") == "error" and isinstance(message, str) and (
+                message == wanted or message.startswith((f"{wanted}\n", f"{wanted} ("))):
+            found += 1
+    return found
+
+
 def describe_rows(new_rows: list[dict]) -> str:
-    """The row's metadata for the report. These five fields are all a row can hold."""
-    if not new_rows:
-        return "no row"
-    row = new_rows[-1]
-    return f"route {row.get('route')}, outcome {row.get('outcome')}, plugin_status {row.get('plugin_status')}, {row.get('duration_ms')} ms"
+    """The rows' metadata for the report: the relay row's five fields, and the alarm's outcome."""
+    relay_rows = [row for row in new_rows if row.get("route") != ROUTE_ALARM]
+    alarms = [str(row.get("outcome")) for row in new_rows if row.get("route") == ROUTE_ALARM]
+    alarm = f"; alarm {', '.join(alarms)}" if alarms else ""
+    if not relay_rows:
+        return f"no row{alarm}"
+    row = relay_rows[-1]
+    return (f"route {row.get('route')}, outcome {row.get('outcome')}, plugin_status {row.get('plugin_status')}, "
+            f"{row.get('duration_ms')} ms{alarm}")
 
 
 def run_one_case(case: Case, instance: object, stand_in: StandInPlugin, webhook_url: str, relay_secret: str, timing: Timing) -> tuple[bool, str]:
     """Post *case* and judge what it left. Returns whether it held, and a line with no value in it."""
     stand_in.answer_status = case.answer_status
     stand_in.answer_delay_seconds = case.answer_delay_seconds
+    stand_in.answers_garbage = case.answers_garbage
     stand_in.set_running(case.stand_in_up)
     received_before = len(stand_in.received)
     rows_before = len(instance.rows())
+    log_mark = instance.log_mark()
     document = {"sender": case.sender, "sent_at": datetime.now(timezone.utc).isoformat(), "text": CHECK_TEXT}
     secret = {SECRET_NONE: None, SECRET_WRONG: secrets.token_hex(32), SECRET_RIGHT: relay_secret}[case.secret]
-    status = post_to_webhook(webhook_url, secret, json.dumps(document, ensure_ascii=False).encode("utf-8"))
-    if case.expected_route is None:
+    body = SENDERLESS_BODY if case.posts_senderless_body else json.dumps(document, ensure_ascii=False).encode("utf-8")
+    status = post_to_webhook(webhook_url, secret, body)
+    wanted = (case.expected_route is not None) + (case.expected_alarm is not None)
+    if wanted == 0:
         time.sleep(timing.settle_seconds)
         new_rows = instance.rows()[rows_before:]
     else:
-        new_rows = wait_for_new_rows(instance, rows_before, timing)
+        new_rows = wait_for_new_rows(instance, rows_before, timing, wanted)
     problems = [f"status was not {case.expected_status}"] if status != case.expected_status else []
     problems += row_problems(case, new_rows)
+    log_lines = alarm_log_lines(instance.log_since(log_mark), case.expected_alarm) if case.expected_alarm else 0
+    if case.expected_alarm and not log_lines:
+        problems.append(f"no line in n8n's log says alarm {case.expected_alarm}")
     arrived = stand_in.received[received_before:]
     if len(arrived) != (1 if case.reaches_plugin else 0):
         problems.append(f"the stand-in received {len(arrived)} posts")
     elif arrived and json.loads(arrived[0]) != document:
         problems.append("the body the stand-in received was not the body posted")
     verdict = "pass" if not problems else f"FAIL: {'; '.join(problems)}"
-    return not problems, f"{case.name}: {verdict} (status {status}; {describe_rows(new_rows)})"
+    logged = f"; {log_lines} log line{'' if log_lines == 1 else 's'}" if case.expected_alarm else ""
+    return not problems, f"{case.name}: {verdict} (status {status}; {describe_rows(new_rows)}{logged})"
 
 
 def record_the_over_long_body(instance: object, stand_in: StandInPlugin, webhook_url: str, relay_secret: str, timing: Timing, report: Report) -> None:
     """The sixth case: not judged, since what it answers is the thing to find out."""
     stand_in.answer_status = ACCEPTED_STATUS
     stand_in.answer_delay_seconds = 0.0
+    stand_in.answers_garbage = False
     stand_in.set_running(True)
     received_before = len(stand_in.received)
     rows_before = len(instance.rows())
@@ -387,21 +516,28 @@ def record_the_over_long_body(instance: object, stand_in: StandInPlugin, webhook
     report(f"over 65,536 bytes ({len(body)} posted): webhook answered {status}, stand-in received {sizes}; {describe_rows(new_rows)}")
 
 
-def exercise(instance: object, stand_in: StandInPlugin, template: dict, table_id: str, gate_broken: str | None,
-             timing: Timing, report: Report, webhook_url: str) -> int:
+def exercise(instance: object, stand_in: StandInPlugin, templates: tuple[dict, dict], table_id: str, gate_broken: str | None,
+             timing: Timing, report: Report, webhook_urls: tuple[str, str]) -> int:
     """Everything between the clean-ups: install, every case. Returns the exit code."""
     relay_secret, plugin_secret = secrets.token_hex(32), secrets.token_hex(32)
-    report(f"publishing the check's workflow, which takes about half a minute{'' if gate_broken is None else f'; {gate_broken} is broken on purpose'}")
+    report(f"publishing the check's workflows, which takes about half a minute{'' if gate_broken is None else f'; {gate_broken} is broken on purpose'}")
     if instance.leftovers():
         report("removing what an interrupted run left")
         instance.remove_leftovers()
-    workflow = build_check_workflow(template, stand_in.url, table_id, gate_broken)
-    instance.install(workflow, check_credentials(relay_secret, plugin_secret, gate_broken))
+    relay_template, alarm_template = templates
+    workflow = build_check_workflow(relay_template, stand_in.url, table_id, gate_broken)
+    alarm_workflow = build_check_alarm_workflow(alarm_template, table_id)
+    table_gone_workflow = build_table_gone_workflow(relay_template, stand_in.url, gate_broken)
+    instance.install([alarm_workflow, workflow, table_gone_workflow], check_credentials(relay_secret, plugin_secret, gate_broken))
+    webhook_url, table_gone_url = webhook_urls
     wait_for_webhook(webhook_url, timing)
+    wait_for_webhook(table_gone_url, timing)
+    # n8n hands a failed run only to an error workflow it has published, and says nothing if it has not.
+    instance.wait_until_published(CHECK_ALARM_WORKFLOW_ID, timing.webhook_wait_seconds)
     cases = relay_cases(timing)
     passed = 0
     for case in cases:
-        held, line = run_one_case(case, instance, stand_in, webhook_url, relay_secret, timing)
+        held, line = run_one_case(case, instance, stand_in, table_gone_url if case.posts_to_table_gone else webhook_url, relay_secret, timing)
         passed += held
         report(line)
     record_the_over_long_body(instance, stand_in, webhook_url, relay_secret, timing, report)
@@ -412,15 +548,16 @@ def exercise(instance: object, stand_in: StandInPlugin, template: dict, table_id
     return 0 if passed == len(cases) else EXIT_FAILED
 
 
-def run_check(instance: object, template: dict, table_id: str, gate_broken: str | None, timing: Timing, report: Report,
-              webhook_url: str = CHECK_WEBHOOK_URL) -> int:
-    """The whole run. Whatever happens, the clean-up runs before anything else is said."""
+def run_check(instance: object, templates: tuple[dict, dict], table_id: str, gate_broken: str | None, timing: Timing, report: Report,
+              webhook_urls: tuple[str, str] = (CHECK_WEBHOOK_URL, CHECK_TABLE_GONE_WEBHOOK_URL)) -> int:
+    """The whole run, given the relay's template and Relay failed's. Whatever happens, the clean-up
+    runs before anything else is said."""
     stand_in = StandInPlugin()
     stand_in.start()
     code = EXIT_FAILED
     clean_up_problem = None
     try:
-        code = exercise(instance, stand_in, template, table_id, gate_broken, timing, report, webhook_url)
+        code = exercise(instance, stand_in, templates, table_id, gate_broken, timing, report, webhook_urls)
     except CheckError as error:
         report(f"FAIL: {error}")
     finally:
@@ -449,7 +586,7 @@ class N8nInstance:
 
     def __init__(self, table_id: str, run: Callable[..., subprocess.CompletedProcess[str]] = subprocess.run,
                  home: str = N8N_HOME, database: str = DATABASE_PATH, unpublish_wait_seconds: float = UNPUBLISH_WAIT_SECONDS,
-                 poll_seconds: float = UNPUBLISH_POLL_SECONDS):
+                 poll_seconds: float = UNPUBLISH_POLL_SECONDS, log_path: str = LOG_PATH):
         if not workflow_template.TABLE_ID_PATTERN.match(table_id):
             raise CheckError("the check table's id holds characters n8n's ids do not")
         self.table_name = f"data_table_user_{table_id}"
@@ -458,6 +595,7 @@ class N8nInstance:
         self.database = database
         self.unpublish_wait_seconds = unpublish_wait_seconds
         self.poll_seconds = poll_seconds
+        self.log_path = log_path
 
     def _as_n8n(self, *command: str, input_text: str | None = None) -> subprocess.CompletedProcess[str]:
         return self.run(["sudo", "-u", N8N_USER, *command], cwd=self.home, input=input_text, capture_output=True, text=True, check=False)
@@ -482,31 +620,55 @@ class N8nInstance:
         return self._read(f"SELECT received_at, route, outcome, plugin_status, duration_ms FROM {self.table_name} ORDER BY id")
 
     def _publication_rows_left(self) -> int:
-        """The row that says the check's workflow is published, the last thing the daemon removes."""
-        return self._count(f"SELECT COUNT(*) FROM workflow_published_version WHERE workflowId = '{CHECK_WORKFLOW_ID}'")
+        """The rows that say the check's workflows are published, the last thing the daemon removes."""
+        return self._count(f"SELECT COUNT(*) FROM workflow_published_version WHERE workflowId IN ({CHECK_WORKFLOW_IDS_SQL})")
+
+    def wait_until_published(self, workflow_id: str, wait_seconds: float) -> None:
+        """Until the daemon has published *workflow_id*, which it does on its own clock after the CLI asks."""
+        deadline = time.monotonic() + wait_seconds
+        while not self._count(f"SELECT COUNT(*) FROM workflow_published_version WHERE workflowId = '{workflow_id}'"):
+            if time.monotonic() >= deadline:
+                raise CheckError(f"n8n had not published {workflow_id} after {wait_seconds:g}s")
+            time.sleep(self.poll_seconds)
+
+    def log_mark(self) -> int:
+        """Where n8n's log ends now, to read what is written after it."""
+        result = self._as_n8n("/usr/bin/stat", "-f", "%z", self.log_path)
+        if result.returncode != 0 or not result.stdout.strip().isdigit():
+            raise CheckError(f"could not read how long n8n's log is, exit {result.returncode}")
+        return int(result.stdout.strip())
+
+    def log_since(self, mark: int) -> str:
+        """What n8n has logged since *mark*. Only counted by the check, never printed."""
+        result = self._as_n8n("/usr/bin/tail", "-c", f"+{mark + 1}", self.log_path)
+        if result.returncode != 0:
+            raise CheckError(f"could not read n8n's log, exit {result.returncode}")
+        return result.stdout
 
     def leftovers(self) -> int:
         """How many things of the check's are in n8n now, the rows nothing cascades to included."""
         return self._count(
-            f"SELECT (SELECT COUNT(*) FROM workflow_entity WHERE id = '{CHECK_WORKFLOW_ID}')"
+            f"SELECT (SELECT COUNT(*) FROM workflow_entity WHERE id IN ({CHECK_WORKFLOW_IDS_SQL}))"
             f" + (SELECT COUNT(*) FROM credentials_entity WHERE id IN ('{CHECK_RELAY_CREDENTIAL_ID}', '{CHECK_PLUGIN_CREDENTIAL_ID}'))"
-            f" + (SELECT COUNT(*) FROM workflow_published_version WHERE workflowId = '{CHECK_WORKFLOW_ID}')"
-            f" + (SELECT COUNT(*) FROM webhook_entity WHERE workflowId = '{CHECK_WORKFLOW_ID}')"
-            f" + (SELECT COUNT(*) FROM workflow_publication_outbox WHERE workflowId = '{CHECK_WORKFLOW_ID}')"
-            f" + (SELECT COUNT(*) FROM workflow_statistics WHERE workflowId = '{CHECK_WORKFLOW_ID}')"
+            f" + (SELECT COUNT(*) FROM workflow_published_version WHERE workflowId IN ({CHECK_WORKFLOW_IDS_SQL}))"
+            f" + (SELECT COUNT(*) FROM webhook_entity WHERE workflowId IN ({CHECK_WORKFLOW_IDS_SQL}))"
+            f" + (SELECT COUNT(*) FROM workflow_publication_outbox WHERE workflowId IN ({CHECK_WORKFLOW_IDS_SQL}))"
+            f" + (SELECT COUNT(*) FROM workflow_statistics WHERE workflowId IN ({CHECK_WORKFLOW_IDS_SQL}))"
             f" + (SELECT COUNT(*) FROM {self.table_name})")
 
     def _unpublish(self) -> None:
-        """Unpublish the check's workflow and wait for the daemon to finish taking it down.
+        """Unpublish each of the check's workflows there and wait for the daemon to finish taking them down.
 
         n8n's foreign key refuses to delete a published workflow, and only the running daemon
         removes the row that says it is one, so a delete before that fails, and fails again.
         """
-        self._cli("unpublish:workflow", f"--id={CHECK_WORKFLOW_ID}")
+        for workflow_id in CHECK_WORKFLOW_IDS:
+            if self._count(f"SELECT COUNT(*) FROM workflow_entity WHERE id = '{workflow_id}'"):
+                self._cli("unpublish:workflow", f"--id={workflow_id}")
         deadline = time.monotonic() + self.unpublish_wait_seconds
         while self._publication_rows_left():
             if time.monotonic() >= deadline:
-                raise CheckError(f"n8n had not finished unpublishing the check's workflow after {self.unpublish_wait_seconds:g}s")
+                raise CheckError(f"n8n had not finished unpublishing the check's workflows after {self.unpublish_wait_seconds:g}s")
             time.sleep(self.poll_seconds)
 
     def _sweep_hand_over_folders(self) -> None:
@@ -523,13 +685,13 @@ class N8nInstance:
         the check's own table is emptied, and that one is the check's alone.
         """
         self._sweep_hand_over_folders()
-        if self._count(f"SELECT COUNT(*) FROM workflow_entity WHERE id = '{CHECK_WORKFLOW_ID}'"):
+        if self._count(f"SELECT COUNT(*) FROM workflow_entity WHERE id IN ({CHECK_WORKFLOW_IDS_SQL})"):
             self._unpublish()
         sql = ("PRAGMA foreign_keys=ON; BEGIN;"
-               f" DELETE FROM webhook_entity WHERE workflowId = '{CHECK_WORKFLOW_ID}';"
-               f" DELETE FROM workflow_publication_outbox WHERE workflowId = '{CHECK_WORKFLOW_ID}';"
-               f" DELETE FROM workflow_statistics WHERE workflowId = '{CHECK_WORKFLOW_ID}';"
-               f" DELETE FROM workflow_entity WHERE id = '{CHECK_WORKFLOW_ID}';"
+               f" DELETE FROM webhook_entity WHERE workflowId IN ({CHECK_WORKFLOW_IDS_SQL});"
+               f" DELETE FROM workflow_publication_outbox WHERE workflowId IN ({CHECK_WORKFLOW_IDS_SQL});"
+               f" DELETE FROM workflow_statistics WHERE workflowId IN ({CHECK_WORKFLOW_IDS_SQL});"
+               f" DELETE FROM workflow_entity WHERE id IN ({CHECK_WORKFLOW_IDS_SQL});"
                f" DELETE FROM credentials_entity WHERE id IN ('{CHECK_RELAY_CREDENTIAL_ID}', '{CHECK_PLUGIN_CREDENTIAL_ID}');"
                f" DELETE FROM {self.table_name};"
                " COMMIT;")
@@ -537,20 +699,23 @@ class N8nInstance:
         if result.returncode != 0:
             raise CheckError(f"sqlite3 could not remove the check's leftovers, exit {result.returncode}")
 
-    def install(self, workflow: dict, credentials: list[dict]) -> None:
-        """Import the credentials and the workflow and publish it. The copies go whatever happens."""
+    def install(self, workflows: list[dict], credentials: list[dict]) -> None:
+        """Import the credentials and each workflow, then publish each. The copies go whatever happens."""
         made = self._as_n8n("/usr/bin/mktemp", "-d", f"{self.home}/{HAND_OVER_FOLDER_PREFIX}XXXXXX")
         directory = made.stdout.strip()
         if made.returncode != 0 or not directory:
             raise CheckError(f"could not make a folder {N8N_USER} can read")
         try:
-            for name, content, command in (("credentials.json", credentials, "import:credentials"), ("workflow.json", workflow, "import:workflow")):
+            hand_overs = [("credentials.json", credentials, "import:credentials"),
+                          *((f"workflow-{index}.json", workflow, "import:workflow") for index, workflow in enumerate(workflows))]
+            for name, content, command in hand_overs:
                 path = f"{directory}/{name}"
                 written = self._as_n8n("/bin/sh", "-c", 'umask 077; cat >"$1"', "sh", path, input_text=json.dumps(content))
                 if written.returncode != 0:
                     raise CheckError(f"could not hand {name} to {N8N_USER}")
                 self._cli(command, f"--input={path}")
-            self._cli("publish:workflow", f"--id={CHECK_WORKFLOW_ID}")
+            for workflow in workflows:
+                self._cli("publish:workflow", f"--id={workflow['id']}")
         finally:
             self._as_n8n("/bin/rm", "-rf", directory)
 
@@ -610,13 +775,13 @@ def main() -> int:
     arguments = parser.parse_args()
     interrupt_on_termination()
     try:
-        template = workflow_template.read_json(RELAY_TEMPLATE)
+        templates = (workflow_template.read_json(RELAY_TEMPLATE), workflow_template.read_json(RELAY_FAILED_TEMPLATE))
         table_id = find_check_table()
         instance = N8nInstance(table_id)
     except (CheckError, workflow_template.TemplateError) as error:
         print(f"not run: {error}", file=sys.stderr)
         return EXIT_FAILED
-    return run_check(instance, template, table_id, arguments.gate_broken, Timing(), lambda line: print(line, flush=True))
+    return run_check(instance, templates, table_id, arguments.gate_broken, Timing(), lambda line: print(line, flush=True))
 
 
 if __name__ == "__main__":
