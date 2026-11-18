@@ -105,7 +105,8 @@ def post_command(
 
     Raises:
         UnicodeDecodeError: the body is not UTF-8. Its `object` is the whole body.
-        http.client.HTTPException: the reply is cut short, or is not HTTP.
+        http.client.HTTPException: the reply is cut short or malformed, or is not HTTP; or the
+            URL is one http.client refuses before sending (InvalidURL, a port that is not a number).
         OSError: the function cannot be reached (URLError and TimeoutError among them).
     """
     try:

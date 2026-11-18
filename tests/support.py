@@ -24,7 +24,7 @@ ZACK_PHONE = "+15550100199"
 PARTNER_PHONE = "+15550100142"
 SECRET = "s" * 40
 # A household function's reply cut short, as real urllib reads one: 100 bytes declared, 5 sent.
-CUT_SHORT_MISSING_BYTES = 95
+CUT_SHORT_DECLARED_LENGTH = 100
 CUT_SHORT_RECEIVED = b"Added"
 NOT_HTTP_STATUS_LINE = "SPAM 200 nope"
 
@@ -107,7 +107,8 @@ class CutShortResponse(io.BytesIO):
 
     def read(self, size: int | None = -1) -> bytes:
         """Raise IncompleteRead, as http.client does when the connection closes early."""
-        raise http.client.IncompleteRead(CUT_SHORT_RECEIVED, expected=CUT_SHORT_MISSING_BYTES)
+        raise http.client.IncompleteRead(CUT_SHORT_RECEIVED,
+                                         expected=CUT_SHORT_DECLARED_LENGTH - len(CUT_SHORT_RECEIVED))
 
 
 def function_cut_short(request: object, timeout: float) -> CutShortResponse:
