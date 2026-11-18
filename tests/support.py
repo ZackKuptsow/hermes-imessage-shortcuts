@@ -2,13 +2,17 @@
 
 from __future__ import annotations
 
+import http.client
 import importlib
 import importlib.util
+import io
 import os
 import subprocess
 import sys
+from http import HTTPStatus
 from pathlib import Path
 from types import ModuleType
+from typing import NoReturn
 
 PACKAGE_NAME = "imessage_shortcuts"
 PLUGIN_DIRECTORY = Path(__file__).resolve().parent.parent / "imessage-shortcuts"
@@ -19,6 +23,10 @@ ZACK_EMAIL = "zack@example.com"
 ZACK_PHONE = "+15550100199"
 PARTNER_PHONE = "+15550100142"
 SECRET = "s" * 40
+# A household function's reply cut short, as real urllib reads one: 100 bytes declared, 5 sent.
+CUT_SHORT_DECLARED_LENGTH = 100
+CUT_SHORT_RECEIVED = b"Added"
+NOT_HTTP_STATUS_LINE = "SPAM 200 nope"
 
 
 def plugin_package() -> ModuleType:
@@ -86,3 +94,28 @@ def write_allow_list(directory: Path, *lines: str) -> Path:
     path = directory / "zack-handles.txt"
     path.write_text("\n".join(lines) + "\n", encoding="utf-8")
     return path
+
+
+class CutShortResponse(io.BytesIO):
+    """urlopen's response to a 200 whose body ends before its Content-Length.
+
+    The opener returns it as http.client returns the real one; only its read() raises, so the
+    reply fails where post_command reads it.
+    """
+
+    status = HTTPStatus.OK
+
+    def read(self, size: int | None = -1) -> bytes:
+        """Raise IncompleteRead, as http.client does when the connection closes early."""
+        raise http.client.IncompleteRead(CUT_SHORT_RECEIVED,
+                                         expected=CUT_SHORT_DECLARED_LENGTH - len(CUT_SHORT_RECEIVED))
+
+
+def function_cut_short(request: object, timeout: float) -> CutShortResponse:
+    """An opener standing in for urlopen when the household function's reply is cut short."""
+    return CutShortResponse()
+
+
+def function_not_http(request: object, timeout: float) -> NoReturn:
+    """An opener standing in for urlopen when the reply's status line is not HTTP: it raises, as urlopen does."""
+    raise http.client.BadStatusLine(NOT_HTTP_STATUS_LINE)
