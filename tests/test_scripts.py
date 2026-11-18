@@ -22,7 +22,7 @@ from types import ModuleType
 from typing import NoReturn
 from unittest import mock
 
-from support import PARTNER_PHONE, ZACK_EMAIL, ZACK_PHONE, RecordingRun
+from support import PARTNER_PHONE, ZACK_EMAIL, ZACK_PHONE, RecordingRun, function_cut_short, function_not_http
 
 BIN = Path(__file__).resolve().parent.parent / "bin"
 FUNCTION_URL = "https://function.example.invalid/"
@@ -30,6 +30,7 @@ HOUSEHOLD_ANSWER = "Added oat milk. The list: oat milk, her prescription refill.
 HOUSEHOLD_SECRET = "h" * 64
 IMSG_NOT_STARTED = '{"status":"error","disposition":"not_started"}'
 SENT_AT = "2026-10-27T13:14:05-04:00"
+UNREADABLE_ANSWER = HOUSEHOLD_ANSWER.encode() + b"\xff"  # 0xff cannot begin a UTF-8 character
 
 
 class ScriptTest(unittest.TestCase):
@@ -140,6 +141,17 @@ def function_answering(status: int, body: str = "") -> Callable[..., StubRespons
     return opener
 
 
+class StubBytesResponse(io.BytesIO):
+    """urlopen's 200 as post_command reads it, its body bytes as sent: a StubResponse's is always UTF-8."""
+
+    status = HTTPStatus.OK
+
+
+def function_answering_bytes(body: bytes) -> Callable[..., StubBytesResponse]:
+    """An opener standing in for urlopen: the function answers 200 with *body*, which need not be UTF-8."""
+    return lambda request, timeout: StubBytesResponse(body)
+
+
 def function_unreachable(request, timeout) -> NoReturn:
     """An opener standing in for urlopen when the function cannot be reached at all."""
     raise urllib.error.URLError("connection refused")
@@ -159,7 +171,7 @@ class HouseholdForwardExitCodeTest(ScriptTest):
         (self.home / "data/imessage/household-function-url").write_text(FUNCTION_URL + "\n")
         self.script = load_script("household-forward")
 
-    def run_main(self, opener: Callable[..., StubResponse], imsg_run: RecordingRun) -> tuple[int, str]:
+    def run_main(self, opener: Callable[..., object], imsg_run: RecordingRun) -> tuple[int, str]:
         """household-forward's main() for one command, against a function answering through *opener*.
 
         Returns the exit code and everything printed, standard output and standard error together.
@@ -191,6 +203,9 @@ class HouseholdForwardExitCodeTest(ScriptTest):
              RecordingRun(stdout=IMSG_NOT_STARTED, returncode=1), 1),
             ("an answer imsg cannot be handed", function_answering(200, f"{HOUSEHOLD_ANSWER}\x00"), RecordingRun(), 1),
             ("no answer at all: the function is unreachable", function_unreachable, RecordingRun(), 1),
+            ("an unreadable reply: not UTF-8", function_answering_bytes(UNREADABLE_ANSWER), RecordingRun(), 1),
+            ("an unreadable reply: cut short", function_cut_short, RecordingRun(), 1),
+            ("an unreadable reply: not HTTP", function_not_http, RecordingRun(), 1),
         )
         for case, opener, imsg_run, expected_exit_code in cases:
             with self.subTest(case=case):

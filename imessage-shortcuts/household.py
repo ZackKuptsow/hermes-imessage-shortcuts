@@ -14,6 +14,7 @@ strings `sender`, `sent_at` and `text`, the secret in `X-Household-Assistant-Sec
 from __future__ import annotations
 
 import getpass
+import http.client
 import json
 import subprocess
 import urllib.error
@@ -100,7 +101,13 @@ def build_request(function_url: str, secret: str, sender: str, sent_at: str, tex
 def post_command(
     request: urllib.request.Request, opener: Callable[..., object] = urllib.request.urlopen,
 ) -> tuple[int, str]:
-    """Send *request*; return the status and the body. An HTTP error status is returned, not raised."""
+    """Send *request*; return the status and the body. An HTTP error status is returned, not raised.
+
+    Raises:
+        UnicodeDecodeError: the body is not UTF-8. Its `object` is the whole body.
+        http.client.HTTPException: the reply is cut short, or is not HTTP.
+        OSError: the function cannot be reached (URLError and TimeoutError among them).
+    """
     try:
         with opener(request, timeout=REQUEST_TIMEOUT_SECONDS) as response:  # type: ignore[attr-defined]
             return response.status, response.read().decode("utf-8")
@@ -145,7 +152,14 @@ def forward_household_command(
     request = build_request(read_function_url(settings.function_url_path), secret_reader(), zack, clock(), text)
     try:
         status, answer = post_command(request, opener)
-    except (urllib.error.URLError, TimeoutError, OSError) as error:
+    except UnicodeDecodeError:
+        # Refused, never decoded leniently: an altered answer must not go out, and the NUL
+        # summary below holds only because strict decoding cannot make a lone surrogate. The
+        # error stays out of the summary, since its `object` is the whole answer.
+        return ForwardOutcome(
+            delivered=False, status=None,
+            summary="The household assistant answered, but its answer could not be read, so nothing was sent.")
+    except (urllib.error.URLError, TimeoutError, OSError, http.client.HTTPException) as error:
         return ForwardOutcome(delivered=False, status=None,
                               summary=f"Could not reach the household assistant ({type(error).__name__}).")
     if status == HTTPStatus.NO_CONTENT or (status == HTTPStatus.OK and not answer.strip()):

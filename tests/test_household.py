@@ -12,7 +12,15 @@ import urllib.request
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
-from support import ZACK_EMAIL, ZACK_PHONE, RecordingRun, plugin_module, write_allow_list
+from support import (
+    ZACK_EMAIL,
+    ZACK_PHONE,
+    RecordingRun,
+    function_cut_short,
+    function_not_http,
+    plugin_module,
+    write_allow_list,
+)
 
 household = plugin_module("household")
 
@@ -21,20 +29,27 @@ COMMAND = "add oat milk"
 HOUSEHOLD_SECRET = "h" * 64
 SENT_AT = "2026-10-27T13:14:05-04:00"
 FUNCTION_URL = "https://function.example.invalid/"
+UNREADABLE_ANSWER = b"oat milk\xff"  # 0xff cannot begin a UTF-8 character
 
 
 class StubFunction(BaseHTTPRequestHandler):
-    """The inbound function: records each request and answers with the class's status and body."""
+    """The inbound function: records each request and answers with the class's status and body.
+
+    A body given as str is sent as UTF-8; one given as bytes is sent as it is.
+    """
 
     answer_status = 200
-    answer_body = ANSWER
+    answer_body: str | bytes = ANSWER
     requests: list[dict] = []
 
     def do_POST(self):  # noqa: N802 -- the name http.server calls
         length = int(self.headers.get("Content-Length", "0"))
         StubFunction.requests.append({"body": json.loads(self.rfile.read(length)), "headers": dict(self.headers),
                                       "path": self.path})
-        payload = StubFunction.answer_body.encode() if StubFunction.answer_status == 200 else b""
+        payload = b""
+        if StubFunction.answer_status == 200:
+            body = StubFunction.answer_body
+            payload = body if isinstance(body, bytes) else body.encode()
         self.send_response(StubFunction.answer_status)
         self.send_header("Content-Length", str(len(payload)))
         self.end_headers()
@@ -74,9 +89,10 @@ class ForwardTest(unittest.TestCase):
                                           headers=dict(request.header_items()))
         return urllib.request.urlopen(rerouted, timeout=timeout)
 
-    def forward(self, command: str = COMMAND, secret_reader=lambda: HOUSEHOLD_SECRET):
+    def forward(self, command: str = COMMAND, secret_reader=lambda: HOUSEHOLD_SECRET, opener=None):
         return household.forward_household_command(command, self.settings, secret_reader=secret_reader,
-                                                   opener=self.to_stub, run=self.imsg_run, clock=lambda: SENT_AT)
+                                                   opener=opener or self.to_stub, run=self.imsg_run,
+                                                   clock=lambda: SENT_AT)
 
     def test_posts_the_contract_as_zacks_phone_and_texts_him_the_answer(self):
         outcome = self.forward()
@@ -135,6 +151,30 @@ class ForwardTest(unittest.TestCase):
         self.assertEqual((outcome.delivered, outcome.nothing_to_send, outcome.status, self.imsg_run.calls),
                          (False, False, None, []))
         self.assertNotIn("example.invalid", outcome.summary)
+
+    # A reply that cannot be read raises inside post_command, where real urllib raises it: the
+    # decode for one that is not UTF-8, read() for one cut short, the opener for one not HTTP.
+
+    def test_an_unreadable_reply_not_utf8_sends_nothing_and_says_so_without_the_answer(self):
+        StubFunction.answer_body = UNREADABLE_ANSWER
+        outcome = self.forward()
+        self.assertEqual((outcome.delivered, outcome.nothing_to_send, outcome.status, self.imsg_run.calls),
+                         (False, False, None, []))
+        self.assertEqual(outcome.summary,
+                         "The household assistant answered, but its answer could not be read, so nothing was sent.")
+        self.assertNotIn("oat milk", outcome.summary)
+
+    def test_an_unreadable_reply_cut_short_is_reported_as_not_reached(self):
+        outcome = self.forward(opener=function_cut_short)
+        self.assertEqual((outcome.delivered, outcome.nothing_to_send, outcome.status, self.imsg_run.calls),
+                         (False, False, None, []))
+        self.assertEqual(outcome.summary, "Could not reach the household assistant (IncompleteRead).")
+
+    def test_an_unreadable_reply_that_is_not_http_is_reported_as_not_reached(self):
+        outcome = self.forward(opener=function_not_http)
+        self.assertEqual((outcome.delivered, outcome.nothing_to_send, outcome.status, self.imsg_run.calls),
+                         (False, False, None, []))
+        self.assertEqual(outcome.summary, "Could not reach the household assistant (BadStatusLine).")
 
     def test_an_empty_command_posts_nothing(self):
         with self.assertRaises(household.ForwardError):
