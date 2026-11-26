@@ -35,3 +35,24 @@ profile has every text answered `503`, the alarm about it still goes out, until 
 platform next connects. A reconnect or a restart reruns the start checks, which refuse the
 widened profile; from then on `/imessage/send` answers `503` too, or nothing listens, and
 n8n's run record and its log are what report it.
+
+## A session's question, texted
+
+`POST /imessage/question` texts one question that a session in another profile is waiting
+on, for that profile's `imessage-questions` plugin. The route exists only while the texting
+profile's `IMESSAGE_SHORTCUTS_QUESTION_SECRET` is set; without it the listener answers `404`.
+It takes that secret alone in `X-Hermes-Secret`: the Shortcut's secret gets a `401` here, and
+the question secret gets a `401` on the other two routes, so the profile that asks holds no
+key that posts a text as you or sends to a handle it names. The listener refuses to start
+while the two secrets are the same, or the question secret is under 32 characters.
+
+Its body is a JSON object of two strings, `question` and `session`. `session` is a short
+label for the session that asked (the plugin sends its workspace folder's name, or the
+surface it runs on) and may be blank. The same checks come first (`403` off the loopback
+address, `503` while the platform is not serving, `401` without the question secret), then
+`400` for a malformed body, a question with no words, or one holding a NUL or a lone
+surrogate. The text is composed here: a line naming the session, the question, and a line
+saying to answer at the Mac. It goes to the first handle on the allow list, through gate 3
+like every other text. `202` means imsg reported `sent`; `502` means it did not, with the
+same JSON body as `/imessage/send` and never the question. Like a send it opens no session
+and checks no toolsets, and nothing of the question reaches the texting profile's model.

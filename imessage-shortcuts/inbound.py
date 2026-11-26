@@ -4,8 +4,9 @@ The Message automation sends one request per text: `POST` with the shared secret
 `X-Hermes-Secret` and a JSON object of three strings, `sender`, `sent_at` and `text` (the
 household assistant's contract, so one Shortcut shape serves both automations). A send
 request, from a loopback caller such as n8n's alarms, is the same secret and a JSON object
-of two strings, `to` and `text`. The secret is compared first, in constant time; the body
-is read only after it matches.
+of two strings, `to` and `text`. A question, from another profile's `imessage-questions`
+plugin, is a secret of its own and a JSON object of two strings, `question` and `session`.
+The secret is compared first, in constant time; the body is read only after it matches.
 """
 
 from __future__ import annotations
@@ -18,6 +19,7 @@ from datetime import datetime
 
 FIELD_NAMES = ("sender", "sent_at", "text")
 MAXIMUM_BODY_BYTES = 65_536
+QUESTION_FIELD_NAMES = ("question", "session")
 SECRET_HEADER = "X-Hermes-Secret"  # noqa: S105 -- a header name, not a secret
 SECRET_MINIMUM_LENGTH = 32
 SEND_FIELD_NAMES = ("text", "to")
@@ -65,6 +67,14 @@ def is_a_moment(value: str) -> bool:
     except ValueError:
         return False
     return moment.tzinfo is not None
+
+
+@dataclass(frozen=True)
+class QuestionRequest:
+    """One question a session is waiting on, as its profile's plugin posted it."""
+
+    question: str
+    session: str
 
 
 @dataclass(frozen=True)
@@ -121,3 +131,18 @@ def parse_send_request(raw: bytes) -> SendRequest:
         MalformedMessageError: the body is not an object of the two strings (`read_string_fields`).
     """
     return SendRequest(**read_string_fields(raw, SEND_FIELD_NAMES))
+
+
+def parse_question_request(raw: bytes) -> QuestionRequest:
+    """Read the two strings out of a question's body.
+
+    A blank session label is taken: the text then names no session.
+
+    Raises:
+        MalformedMessageError: the body is not an object of the two strings
+            (`read_string_fields`), or the question holds no words: its text would ask nothing.
+    """
+    values = read_string_fields(raw, QUESTION_FIELD_NAMES)
+    if not values["question"].strip():
+        raise MalformedMessageError("the field 'question' holds no words")
+    return QuestionRequest(**values)

@@ -27,6 +27,13 @@ reached by a loopback caller holding the secret, never by a text, and the model 
 that calls it: it gives a text no reach beyond the two toolsets (smart-home ADR 0035). It
 leaves the way a reply does (`_send_text`), so the third wall holds for it too.
 
+`POST /imessage/question` texts the first handle on the allow list a question that a session
+in another profile is waiting on, posted by that profile's `imessage-questions` plugin. The
+route exists only while IMESSAGE_SHORTCUTS_QUESTION_SECRET is set, and takes that secret
+alone: the other profile holds no key that posts a text as Zack or sends to a handle it
+names. The question goes out and nothing comes back in: it opens no session here, and a
+reply to it is a text like any other.
+
 A 204 says why it dropped a request in X-Imessage-Dropped, one of DropReason's words, so
 n8n can alarm on a sender drop and not on a duplicate or an empty text.
 
@@ -56,7 +63,7 @@ from gateway.platforms.helpers import MessageDeduplicator, send_chunks, strip_ma
 from hermes_cli.config import get_config_path
 from hermes_constants import get_hermes_home
 
-from . import allowed_toolsets, fixed_phrases, handles, household, imsg, inbound
+from . import allowed_toolsets, fixed_phrases, handles, household, imsg, inbound, question_text
 
 DEFAULT_HOST = "127.0.0.1"
 DEFAULT_PORT = 8645
@@ -67,6 +74,7 @@ ENV_ALLOWED_USERS = "IMESSAGE_SHORTCUTS_ALLOWED_USERS"
 ENV_HOST = "IMESSAGE_SHORTCUTS_HOST"
 ENV_IMSG = "IMESSAGE_SHORTCUTS_IMSG"
 ENV_PORT = "IMESSAGE_SHORTCUTS_PORT"
+ENV_QUESTION_SECRET = "IMESSAGE_SHORTCUTS_QUESTION_SECRET"  # noqa: S105 -- an env name, not a secret
 ENV_SECRET = "IMESSAGE_SHORTCUTS_SECRET"  # noqa: S105 -- an env name, not a secret
 INGRESS_PATH = "/imessage"
 LOG_PREFIX = "[imessage_shortcuts]"
@@ -74,6 +82,7 @@ LOOPBACK_ADDRESSES = frozenset({"127.0.0.1", "::1"})
 MAX_MESSAGE_LENGTH = 4000
 PARTIAL_OVERFLOW_KEY = "partial_overflow"  # send_chunks's mark of a send that failed after earlier chunks landed
 PLATFORM_NAME = "imessage_shortcuts"
+QUESTION_PATH = "/imessage/question"
 ROUTED_FAILURE_TEXT = "Something went wrong reaching the household assistant, so that may not have been done."
 SEND_PATH = "/imessage/send"
 # The gateway commands a text may run (smart-home ADR 0035): a fresh session, stopping a
@@ -138,6 +147,7 @@ class StartupSettings:
     host: str
     imsg_path: Path
     port: int
+    question_secret: str = field(repr=False)  # "" while the listener takes no questions
     secret: str = field(repr=False)
 
 
@@ -221,8 +231,8 @@ def read_startup_settings() -> StartupSettings:
     Raises:
         StartupRefusedError: the profile is not the texting profile, its config.yaml
             cannot be read, a text could reach a toolset beyond the two, the host is not
-            a loopback address, the secret is short, the allow-all switch is on, the allow
-            lists disagree, or imsg is missing.
+            a loopback address, a secret is short, the question secret is the Shortcut's,
+            the allow-all switch is on, the allow lists disagree, or imsg is missing.
     """
     check_texting_profile()
     try:
@@ -238,6 +248,13 @@ def read_startup_settings() -> StartupSettings:
     secret = get_scoped_secret(ENV_SECRET, "").strip()
     if len(secret) < inbound.SECRET_MINIMUM_LENGTH:
         raise StartupRefusedError(f"{ENV_SECRET} is shorter than {inbound.SECRET_MINIMUM_LENGTH} characters")
+    question_secret = get_scoped_secret(ENV_QUESTION_SECRET, "").strip()
+    if question_secret and len(question_secret) < inbound.SECRET_MINIMUM_LENGTH:
+        raise StartupRefusedError(
+            f"{ENV_QUESTION_SECRET} is shorter than {inbound.SECRET_MINIMUM_LENGTH} characters")
+    if question_secret == secret:
+        # The profile that asks holds the question secret; this one posts texts as the owner.
+        raise StartupRefusedError(f"{ENV_QUESTION_SECRET} must not be {ENV_SECRET}'s value: give it its own")
     if get_scoped_secret(ENV_ALLOW_ALL, "").strip().lower() in TRUTHY_VALUES:
         raise StartupRefusedError(f"{ENV_ALLOW_ALL} is on; this platform serves the allow list alone")
     try:
@@ -252,7 +269,8 @@ def read_startup_settings() -> StartupSettings:
         imsg_path = imsg.find_imsg(get_scoped_secret(ENV_IMSG, "").strip() or None)
     except imsg.ImsgMissingError as error:
         raise StartupRefusedError(str(error)) from error
-    return StartupSettings(allowed=allowed, host=host, imsg_path=imsg_path, port=int(port_text), secret=secret)
+    return StartupSettings(allowed=allowed, host=host, imsg_path=imsg_path, port=int(port_text),
+                           question_secret=question_secret, secret=secret)
 
 
 class ImessageShortcutsAdapter(BasePlatformAdapter):
@@ -279,6 +297,8 @@ class ImessageShortcutsAdapter(BasePlatformAdapter):
         application = web.Application(client_max_size=inbound.MAXIMUM_BODY_BYTES)
         application.router.add_post(INGRESS_PATH, self._handle_post)
         application.router.add_post(SEND_PATH, self._handle_send)
+        if settings.question_secret:
+            application.router.add_post(QUESTION_PATH, self._handle_question)
         self._runner = web.AppRunner(application, access_log=None)
         await self._runner.setup()
         self._settings = settings
@@ -296,6 +316,8 @@ class ImessageShortcutsAdapter(BasePlatformAdapter):
         self._mark_connected()
         logger.info(f"{LOG_PREFIX} listening on {settings.host}:{settings.port}{INGRESS_PATH} and {SEND_PATH} "
                     f"for {len(settings.allowed)} handle(s)")
+        if settings.question_secret:
+            logger.info(f"{LOG_PREFIX} taking other profiles' questions on {QUESTION_PATH}")
         return True
 
     async def disconnect(self) -> None:
@@ -311,18 +333,21 @@ class ImessageShortcutsAdapter(BasePlatformAdapter):
         """Every text's toolsets: the two, whatever the saved list says now (smart-home ADR 0035)."""
         return sorted(allowed_toolsets.ALLOWED_TOOLSETS)
 
-    def _admit(self, request: web.Request) -> StartupSettings | web.Response:
+    def _admit(self, request: web.Request, *, as_a_question: bool = False) -> StartupSettings | web.Response:
         """The settings to serve *request* with, or the refusal it gets before its body is read.
 
-        Both routes check first, in this order: 403 from a peer off the loopback address, 503
-        while the platform is not serving, 401 without the right secret.
+        Every route checks first, in this order: 403 from a peer off the loopback address, 503
+        while the platform is not serving, 401 without the right secret. The question route
+        takes the question secret alone, and the other two the Shortcut's alone, so the
+        profile that asks questions holds no key that posts a text as the owner.
         """
         if request.remote not in LOOPBACK_ADDRESSES:
             return web.Response(status=403)
         settings = self._settings
         if settings is None:
             return web.Response(status=503)
-        if not inbound.secret_matches(settings.secret, request.headers.get(inbound.SECRET_HEADER)):
+        expected = settings.question_secret if as_a_question else settings.secret
+        if not inbound.secret_matches(expected, request.headers.get(inbound.SECRET_HEADER)):
             logger.warning(f"{LOG_PREFIX} refused a request without the right secret")
             return web.Response(status=401)
         return settings
@@ -433,6 +458,35 @@ class ImessageShortcutsAdapter(BasePlatformAdapter):
         if not sent.result.success:
             return web.json_response(sent.failure_body(), status=502)
         logger.info(f"{LOG_PREFIX} sent a text for a loopback caller")
+        return web.Response(status=202)
+
+    async def _handle_question(self, request: web.Request) -> web.Response:
+        """Text one question a session in another profile is waiting on, to the first handle on the allow list.
+
+        The route exists only while a question secret is set, so without one aiohttp answers
+        404. 403, 503 and 401 as the other routes answer them, with the question secret in
+        place of the Shortcut's; 400 when malformed, when the question holds no words, or when
+        it holds a character imsg cannot be handed. 202 when imsg reported `sent`; 502 when it
+        did not, with imsg's disposition in a JSON body as the send endpoint gives it. No
+        session, no duplicate check and no toolset check: the question is a text out, composed
+        here (`question_text`), and nothing of it reaches this profile's model.
+        """
+        settings = self._admit(request, as_a_question=True)
+        if isinstance(settings, web.Response):
+            return settings
+        try:
+            asked = inbound.parse_question_request(await request.read())
+        except inbound.MalformedMessageError as error:
+            logger.warning(f"{LOG_PREFIX} refused a question: {error}")
+            return web.Response(status=400)
+        text = question_text.compose_question_text(asked.question, asked.session)
+        sent = await self._send_text(settings, settings.allowed[0], text)
+        if isinstance(sent.refusal, imsg.UnsendableTextRefusedError):
+            logger.warning(f"{LOG_PREFIX} refused a question: its text cannot be sent")
+            return web.Response(status=400)
+        if not sent.result.success:
+            return web.json_response(sent.failure_body(), status=502)
+        logger.info(f"{LOG_PREFIX} texted a question for another profile's session")
         return web.Response(status=202)
 
     async def send(self, chat_id: str, content: str, reply_to: str | None = None,
