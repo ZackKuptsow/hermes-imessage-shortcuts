@@ -58,3 +58,23 @@ act with whatever access the gateway's process has, so a text reaches two toolse
 
 Save the list with
 `hermes -p imessage config set platform_toolsets.imessage_shortcuts '["imessage_shortcuts","memory"]'`.
+
+## What a session's question can do
+
+`imessage-questions` runs in another profile, the author's on a cloud model with a shell, so
+what it is handed is kept small:
+
+- It holds the question secret and nothing else of the texting profile's: not the Shortcut's
+  secret, not a handle. `POST /imessage/question` takes that secret alone, names no recipient,
+  and texts the first handle on the allow list. The other two routes refuse it.
+- It posts only to `127.0.0.1` or `::1`, refusing any other host before the secret is sent,
+  through no proxy and following no redirect.
+- Only a question is texted (Hermes's `clarify`). An approval's command and a password prompt
+  stay on the Mac, and nothing can be approved or answered by text.
+- A question answered at the Mac inside the delay (two minutes unless you change it) is never
+  texted. One that is texted goes through Apple like any iMessage, so its words leave the Mac;
+  the logs of both plugins hold neither the question nor the session's label.
+
+These are limits on the plugin, not on that profile: an agent there with a shell can read
+either `.env` as you can. The guard that holds against it is the one above, on what a text
+can do.

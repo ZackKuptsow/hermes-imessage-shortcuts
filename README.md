@@ -11,6 +11,9 @@ A platform plugin for [Hermes Agent](https://github.com/NousResearch/hermes-agen
 Messages on your Mac the front door to your agent. Text it from your phone like any other
 contact, and it answers in the same thread.
 
+A second, smaller plugin beside it covers the other direction: when a Hermes session on the
+Mac stops to ask you something and nobody answers, the question is texted to you.
+
 Hermes Agent already has iMessage options of its own: a
 [BlueBubbles gateway](https://github.com/NousResearch/hermes-agent/blob/main/website/docs/user-guide/messaging/bluebubbles.md),
 a hosted [Photon line](https://github.com/NousResearch/hermes-agent/blob/main/website/docs/user-guide/messaging/photon.md)
@@ -28,6 +31,9 @@ local LLMs.
   on the loopback address. Any one of them stops a stranger.
 - **A text can only do so much.** Each text reaches two toolsets, messaging and memory. A terminal,
   a browser or a file tool is never on the other end of a text.
+- **Questions find you.** A session in another profile (your coding agent) that stops to ask
+  something has the question texted to you when nobody answers it at the Mac. It goes out
+  only: you answer at the Mac, and a reply by text never reaches that session.
 - **Proven in the runtime.** CI on macOS installs Hermes Agent with its own script and runs the
   suite inside it.
 
@@ -51,6 +57,25 @@ A Shortcuts "Message" automation on the Mac posts each incoming text to a listen
 runs on the loopback address. Hermes answers, and the plugin sends the reply back through
 [imsg](https://github.com/openclaw/imsg) from the same Messages account. Only handles on an
 allow list get in or get a reply.
+
+### A session's question, texted
+
+```
+a Hermes session stops to ask you something   (a profile with imessage-questions enabled)
+                          │  nobody answers at the Mac for two minutes
+                          ▼
+              POST http://127.0.0.1:8645/imessage/question   (a secret of its own)
+                          │
+                          ▼
+              this plugin ──imsg send──▶ Messages.app ──iMessage──▶ phone
+```
+
+Hermes tells its plugins when a session starts waiting on a person and when the wait ends.
+`imessage-questions`, enabled in the profile whose sessions ask, starts a timer on the first
+and cancels it on the second. A question still unanswered when the timer fires is posted to
+the listener, which texts it to the first handle on the allow list with the name of the
+session's workspace folder. Only a question travels this way, never an approval's command or
+a password prompt, and the texting profile's model sees none of it.
 
 ## What you need
 
@@ -129,10 +154,44 @@ allow list get in or get a reply.
 Send yourself a text. The first reply raises the Automation prompt for Messages; grant it to
 the process it names, which is the gateway's, not a terminal's.
 
+### Questions from your other sessions (optional)
+
+For the profile whose sessions should text you their questions. The lines below use the
+default profile, whose home is `~/.hermes`; for another, use its home and `hermes -p <name>`.
+
+1. **A question secret** of its own, appended to the texting profile's `.env` without being
+   shown. The listener refuses to start if it is the Shortcut's secret:
+
+   ```sh
+   python3 -c 'import secrets; print("\nIMESSAGE_SHORTCUTS_QUESTION_SECRET=" + secrets.token_hex(32))' >> ~/.hermes/profiles/imessage/.env
+   ```
+
+2. **The same value in the asking profile**, copied across without being shown:
+
+   ```sh
+   printf '\nIMESSAGE_QUESTIONS_SECRET=%s\n' "$(grep '^IMESSAGE_SHORTCUTS_QUESTION_SECRET=' ~/.hermes/profiles/imessage/.env | cut -d= -f2-)" >> ~/.hermes/.env
+   ```
+
+3. **The plugin, read in place**, in the asking profile:
+
+   ```sh
+   mkdir -p ~/.hermes/plugins
+   ln -s ~/src/hermes-imessage-shortcuts/imessage-questions ~/.hermes/plugins/imessage-questions
+   hermes plugins enable imessage-questions
+   ```
+
+4. **Restart the gateway** from another terminal. The texting profile's log then says
+   `taking other profiles' questions on /imessage/question`.
+
+A question is texted after two minutes unanswered. To change that, save a number of seconds
+(`0` texts at once):
+`hermes config set plugins.entries.imessage-questions.settings.delay_seconds 300`. The
+settings `host` and `port` follow the listener's if you moved it off `127.0.0.1:8645`.
+
 ### What is not here
 
-The secret, your handle, and the model choice live in the profile (`P/.env`, `P/config.yaml`,
-`P/data/imessage/`). Nothing in this repository holds a value.
+The secrets, your handle, and the model choice live in the profiles (`P/.env`, `P/config.yaml`,
+`P/data/imessage/`, and the asking profile's `.env`). Nothing in this repository holds a value.
 
 ## Security in brief
 
@@ -145,6 +204,11 @@ A sender who is not you has to pass three gates, and any one stops them:
 The listener binds only the loopback address and checks the shared secret, in constant time,
 before it reads a body. A text reaches two toolsets, `imessage_shortcuts` and `memory`, and the
 adapter refuses to run if a setting or a Hermes upgrade would widen that.
+
+The question route has a secret of its own, so the profile that asks holds no key that posts
+a text as you or sends to a handle it names: it can have one question texted to the first
+handle on the allow list, and nothing else. A question's words do leave the Mac, through
+Apple, like any iMessage.
 
 The whole model is in [docs/security.md](docs/security.md), and every status code in
 [docs/http-api.md](docs/http-api.md).
@@ -165,6 +229,7 @@ The optional tool, and the fixed phrases that go around the model, are in
 | Path | What it is |
 |---|---|
 | `imessage-shortcuts/` | the plugin: `adapter.py` (the loopback listener, `POST /imessage` for texts and `POST /imessage/send` for a text out without the model, each `204` saying why in `X-Imessage-Dropped`, and the replies), `handles.py` (canonical handles and the allow list), `allowed_toolsets.py` (the closed list of toolsets a text may reach), `inbound.py` (the request's shape), `imsg.py` (finding and calling imsg), `household.py` and `tools.py` (the optional forward), `fixed_phrases.py` (the texts that go to the household service around the model), `registration.py`, `plugin.yaml` |
+| `imessage-questions/` | the second plugin, for the profile whose sessions ask: `asking.py` (the two hooks around a session's wait on a person), `waiting.py` (one timer per unanswered question), `listener_client.py` (the post to `/imessage/question`, with no proxy and no redirect), `settings.py` (the secret, the delay and the listener's address, each checked) |
 | `bin/imessage-reply` | sends one iMessage, only to a handle on the allow list; a check that imsg works |
 | `bin/household-forward` | forwards one command from a terminal; prints only whether the answer was delivered |
 | `n8n/` | n8n as its own macOS user under a LaunchDaemon: `install.sh`, `watch-egress.sh`, the plist in `launchd/`; the relay workflow as a value-free template in `workflows/`, beside its two alarm workflows, `relay-failed.json` and `inbound-heartbeat.json`, with `render.py`, `export.py`, `import.sh` and `n8n-cli.sh` to move each of the three between git and the instance; `check_relay.py`, run at the Mac, which breaks each gate and reads the rows and the alarm each post leaves; and its own `README.md` |
@@ -200,6 +265,11 @@ Text only: no attachments, no typing indicator, and nothing delivers a cron job'
 yet. Shortcuts hands over the sender's handle in whatever written form it has; every phone
 form is accepted, and a contact's name is refused rather than resolved, since imsg resolves a
 name through Contacts and would send to whoever it matched.
+
+A session's question goes out and its answer does not come back by text: a reply to it reaches
+the texting assistant like any other text, which knows nothing of the question. Only questions
+are texted, each with its choices left at the Mac, and two sessions in one folder carry the
+same label.
 
 ## License
 
