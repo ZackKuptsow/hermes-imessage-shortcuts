@@ -1,0 +1,20 @@
+name: imessage-questions
+label: iMessage questions
+kind: standalone
+version: 0.1.0
+requires_hermes: ">=0.23.1"
+description: >
+  Texts you the question a Hermes session is waiting on when nobody answers it at the
+  Mac. Enable it in the profile whose sessions ask (your coding profile); it posts each
+  unanswered clarify question to the imessage-shortcuts plugin's listener on the loopback
+  address, which texts it to the first handle on that plugin's allow list. Outbound only:
+  a reply by text does not reach the session.
+author: Zack Kuptsow
+provides_hooks:
+  - on_human_input_request
+  - on_human_input_resolved
+requires_env:
+  - name: IMESSAGE_QUESTIONS_SECRET
+    description: "The texting profile's IMESSAGE_SHORTCUTS_QUESTION_SECRET (at least 32 characters)"
+    prompt: "Question secret"
+    password: true
