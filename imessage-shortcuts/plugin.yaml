@@ -34,3 +34,7 @@ optional_env:
     description: "Path to imsg (default: Homebrew's, then PATH)"
     prompt: "imsg path"
     password: false
+  - name: IMESSAGE_SHORTCUTS_QUESTION_SECRET
+    description: "Turns on POST /imessage/question for the imessage-questions plugin: a secret of its own (at least 32 characters), never the Shortcut's"
+    prompt: "Question secret"
+    password: true

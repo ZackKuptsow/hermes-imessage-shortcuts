@@ -16,6 +16,8 @@ from typing import NoReturn
 
 PACKAGE_NAME = "imessage_shortcuts"
 PLUGIN_DIRECTORY = Path(__file__).resolve().parent.parent / "imessage-shortcuts"
+QUESTIONS_PACKAGE_NAME = "imessage_questions"
+QUESTIONS_PLUGIN_DIRECTORY = Path(__file__).resolve().parent.parent / "imessage-questions"
 # Set by setup.sh: the adapter's suite must run, never skip, so a run under the wrong
 # interpreter (or a Hermes re-exec into one) fails instead of passing on skips.
 REQUIRE_HERMES_VARIABLE = "IMESSAGE_SHORTCUTS_TESTS_REQUIRE_HERMES"
@@ -29,23 +31,39 @@ CUT_SHORT_RECEIVED = b"Added"
 NOT_HTTP_STATUS_LINE = "SPAM 200 nope"
 
 
-def plugin_package() -> ModuleType:
-    """The plugin package itself, loaded from its directory and registered once."""
-    if PACKAGE_NAME not in sys.modules:
+def load_package(package_name: str, directory: Path) -> ModuleType:
+    """A plugin package, loaded from its directory under *package_name* and registered once."""
+    if package_name not in sys.modules:
         spec = importlib.util.spec_from_file_location(
-            PACKAGE_NAME, PLUGIN_DIRECTORY / "__init__.py", submodule_search_locations=[str(PLUGIN_DIRECTORY)])
+            package_name, directory / "__init__.py", submodule_search_locations=[str(directory)])
         if spec is None or spec.loader is None:
-            raise ImportError(f"cannot load the plugin package from {PLUGIN_DIRECTORY}")
+            raise ImportError(f"cannot load the plugin package from {directory}")
         package = importlib.util.module_from_spec(spec)
-        sys.modules[PACKAGE_NAME] = package
+        sys.modules[package_name] = package
         spec.loader.exec_module(package)
-    return sys.modules[PACKAGE_NAME]
+    return sys.modules[package_name]
+
+
+def plugin_package() -> ModuleType:
+    """The texting plugin's package itself."""
+    return load_package(PACKAGE_NAME, PLUGIN_DIRECTORY)
 
 
 def plugin_module(name: str) -> ModuleType:
     """Import `<package>.<name>` from the plugin directory."""
     plugin_package()
     return importlib.import_module(f"{PACKAGE_NAME}.{name}")
+
+
+def questions_plugin_package() -> ModuleType:
+    """The package of `imessage-questions`, the plugin for the profile whose sessions ask."""
+    return load_package(QUESTIONS_PACKAGE_NAME, QUESTIONS_PLUGIN_DIRECTORY)
+
+
+def questions_plugin_module(name: str) -> ModuleType:
+    """Import `<package>.<name>` from the `imessage-questions` plugin directory."""
+    questions_plugin_package()
+    return importlib.import_module(f"{QUESTIONS_PACKAGE_NAME}.{name}")
 
 
 def hermes_is_importable() -> bool:
